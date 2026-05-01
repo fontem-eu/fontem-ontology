@@ -1,0 +1,8 @@
+# SHACL shapes for write-time validation.
+#
+# Populated during Phase 0 (sanctions pilot first; others land as
+# their ETLs are ported in Phase 4). Each shape file targets a
+# single class and asserts the constraints the ETL writer must
+# satisfy before the triple set can land in the graph.
+#
+# Naming: shapes/<class-or-domain>.shacl.ttl

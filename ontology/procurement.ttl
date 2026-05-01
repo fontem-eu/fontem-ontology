@@ -1,0 +1,29 @@
+# Procurement ontology — TED domain.
+#
+# Status: stub. Populated during Phase 0.
+#
+# Scope: Authority, Contract, awarded / awardedTo predicates, and
+# the property chain that derives :client / :supplier from those —
+# the axiom that retires materialize_trade_edges and the eu-LISA
+# bug class. CPV taxonomy alignment also lives here.
+
+@prefix fontem:   <http://fontem.void42.net/ontology#> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:      <http://www.w3.org/2002/07/owl#> .
+@prefix wd:       <http://www.wikidata.org/entity/> .
+
+<http://fontem.void42.net/ontology/procurement>
+    a owl:Ontology ;
+    rdfs:label "Fontem procurement ontology"@en ;
+    owl:imports <http://fontem.void42.net/ontology> ;
+    owl:versionInfo "0.0.1-draft" .
+
+# TBox to be filled in during Phase 0.
+# Reference axioms (drafted in MIGRATION.md):
+#   fontem:Authority    rdfs:subClassOf fontem:Organisation, wd:Q327333 .
+#   fontem:Contract     rdfs:subClassOf fontem:Document, wd:Q2334719 .
+#   fontem:awarded      rdfs:domain fontem:Authority ; rdfs:range fontem:Contract .
+#   fontem:awardedTo    rdfs:domain fontem:Contract ; rdfs:range fontem:Company .
+#   fontem:client       owl:propertyChainAxiom ( fontem:awarded fontem:awardedTo ) .
+#   fontem:supplier     owl:inverseOf fontem:client .
