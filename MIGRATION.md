@@ -80,8 +80,8 @@ Not everything moves to RDF. Right-tool-for-the-job:
    │  Virtuoso OS — 20 GB, prod node                 │
    │                                                 │
    │  Named graphs:                                  │
-   │    <http://fontem.eu/ontology>          │
-   │    <http://fontem.eu/data>              │
+   │    <http://data.fontem.eu/ontology>          │
+   │    <http://data.fontem.eu/data>              │
    │    <http://wikidata.org/entity>                 │  ← weekly truthy mirror
    │    <http://dbpedia.org/resource>                │  ← optional, future
    │                                                 │
@@ -144,7 +144,7 @@ Phase 0 produces four artefacts, all in this repo:
 
 Decisions to make and pin:
 
-- **Base IRI** — proposed: `http://fontem.eu/`
+- **Base IRI** — proposed: `http://data.fontem.eu/`
   - `…/id/{ClassName}/{stable_id}` for entities
   - `…/ontology#{TermName}` for the TBox (classes, properties)
   - `…/graph/{name}` for named graphs

@@ -7,16 +7,16 @@
 # the axiom that retires materialize_trade_edges and the eu-LISA
 # bug class. CPV taxonomy alignment also lives here.
 
-@prefix fontem:   <http://fontem.eu/ontology#> .
+@prefix fontem:   <http://data.fontem.eu/ontology#> .
 @prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl:      <http://www.w3.org/2002/07/owl#> .
 @prefix wd:       <http://www.wikidata.org/entity/> .
 
-<http://fontem.eu/ontology/procurement>
+<http://data.fontem.eu/ontology/procurement>
     a owl:Ontology ;
     rdfs:label "Fontem procurement ontology"@en ;
-    owl:imports <http://fontem.eu/ontology> ;
+    owl:imports <http://data.fontem.eu/ontology> ;
     owl:versionInfo "0.0.1-draft" .
 
 # TBox to be filled in during Phase 0.

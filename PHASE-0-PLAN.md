@@ -17,7 +17,7 @@ These are what we agreed on before Phase 0 starts:
 | Decision | Choice |
 |---|---|
 | Storage target | Virtuoso Open Source |
-| Primary IRI host | `http://fontem.eu/` |
+| Primary IRI host | `http://data.fontem.eu/` |
 | IRI patterns | `/id/{Class}/{uuid}` for entities, `/ontology#{Term}` for TBox, hash-namespaced |
 | Stable IDs | Keep existing UUID5s from Neo4j; mechanical port |
 | Embeddings | Postgres + pgvector sidecar; IRIs are the foreign key |
@@ -92,50 +92,43 @@ These are what we agreed on before Phase 0 starts:
 
 ## Workstreams (sequenced)
 
-### Workstream 1 — IRI host decision (½ day)
+### Workstream 1 — IRI host decision (DONE)
 
-Probe done up front (see "DNS finding" below); resolves to a real
-question that needs an answer before WS4 writes the Turtle.
+**Locked: `http://data.fontem.eu/`.**
 
-**DNS finding (May 2026):** `fontem.eu` and `www.fontem.eu` both
-resolve to `51.159.141.141` (Scaleway), which is currently serving
-a Kanboard installation (nginx 1.22.1, sets `KB_SID` cookie,
-redirects `/` → `/login`). The TLS cert does not include `fontem.eu`
-in its SAN. The void42 cluster ingress is not on this IP.
+End-to-end traffic flow:
 
-So `http://fontem.eu/id/Authority/…` as the entity IRI base would
-dereference to a Kanboard login page — not what we want.
+```
+public DNS                       data.fontem.eu → 51.159.141.141 (Scaleway bastion)
+bastion (TLS termination)        443 → reverse path to cluster
+cluster NodePort                 31457 → Service fontem-data (namespace fontem)
+Service                          → Deployment fontem-data-placeholder (nginx)
+```
 
-**Three options:**
+A small placeholder pod (`fontem-data-placeholder`, Alpine nginx,
+~16 MB request) lives in the `fontem` namespace and answers `/`
+with a one-page "knowledge graph in flight" notice and `/healthz`
+with a plain-text 200 for k8s probes. Phase 1 swaps the Service's
+backend to the real Virtuoso pod; the NodePort number stays at
+31457 so the bastion's nginx config doesn't need to change.
 
-1. **Re-point `fontem.eu` DNS** to the void42 cluster, migrate the
-   Kanboard somewhere else (or have nginx in the cluster proxy back
-   to it for `/kb` paths). Largest disruption.
-2. **Use a sub-domain on a separate route.** Pattern Wikidata uses
-   (`www.wikidata.org` for the site, `query.wikidata.org` for SPARQL,
-   entity IRIs `http://www.wikidata.org/entity/Q…` independent of
-   either). For Fontem: `http://data.fontem.eu/id/Authority/…` or
-   `http://kg.fontem.eu/…`. Lowest disruption — add a sub-domain to
-   the cluster ingress, no impact on whatever's at the apex. **My
-   recommendation.**
-3. **Different domain entirely.** Probably overkill.
+K8s manifest is checked in at `infra/fontem-data-placeholder.yaml`.
 
-The output of WS1 is the IRI base locked. Whatever we pick is the
-single host string the entire ontology references; getting it right
-once is cheap, getting it wrong gets discovered three phases later
-when porting is half done.
+Verification (re-runnable):
 
-- [ ] Pick option (recommendation: 2, sub-domain)
-- [ ] Pick concrete sub-domain (`data.fontem.eu` / `kg.fontem.eu` /
-      `id.fontem.eu` — preference)
-- [ ] Add A/AAAA record pointing at the cluster ingress
-- [ ] Get a TLS cert via the existing cluster cert-manager
-- [ ] One-line `sed` across the repo to replace the placeholder
-- [ ] Sketch content-negotiation routing on the ingress (Turtle
-      vs HTML). Implementation lands in Phase 1; for Phase 0 we
-      just confirm the URL pattern works at all.
+```
+dig +short data.fontem.eu A           # → 51.159.141.141
+curl -sSL -o /dev/null -w "%{http_code}\n" https://data.fontem.eu/   # 200
+curl -sSL https://data.fontem.eu/healthz                              # ok
+```
 
-Output: locked IRI base; one note pinned in `MIGRATION.md`.
+Notes on canonical-form IRI:
+- The IRI base is `http://data.fontem.eu/`, not `https://`. RDF
+  convention: identifiers use `http://`, retrieval uses HTTPS.
+  Wikidata is identical (`http://www.wikidata.org/entity/Q…`
+  served over HTTPS).
+- Content negotiation (Turtle vs HTML) is a Phase 1 deliverable; the
+  Phase 0 placeholder serves only HTML.
 
 ### Workstream 2 — Neo4j schema audit (1-2 days)
 

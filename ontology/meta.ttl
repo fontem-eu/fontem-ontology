@@ -6,17 +6,17 @@
 # DecisionLog. The "who said what, when, derived from where" graph
 # that lives parallel to the data graph.
 
-@prefix fontem:   <http://fontem.eu/ontology#> .
+@prefix fontem:   <http://data.fontem.eu/ontology#> .
 @prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl:      <http://www.w3.org/2002/07/owl#> .
 @prefix prov:     <http://www.w3.org/ns/prov#> .
 @prefix dcterms:  <http://purl.org/dc/terms/> .
 
-<http://fontem.eu/ontology/meta>
+<http://data.fontem.eu/ontology/meta>
     a owl:Ontology ;
     rdfs:label "Fontem provenance + meta ontology"@en ;
-    owl:imports <http://fontem.eu/ontology> ;
+    owl:imports <http://data.fontem.eu/ontology> ;
     owl:versionInfo "0.0.1-draft" .
 
 # TBox to be filled in during Phase 0.
