@@ -80,9 +80,10 @@ Not everything moves to RDF. Right-tool-for-the-job:
    │  Virtuoso OS — 20 GB, prod node                 │
    │                                                 │
    │  Named graphs:                                  │
-   │    <http://data.fontem.eu/ontology>          │
-   │    <http://data.fontem.eu/data>              │
+   │    <http://data.fontem.eu/ontology>             │
+   │    <http://data.fontem.eu/data>                 │
    │    <http://wikidata.org/entity>                 │  ← weekly truthy mirror
+   │    <http://linkedopendata.eu/entity>            │  ← EUKG (Kohesio) mirror
    │    <http://dbpedia.org/resource>                │  ← optional, future
    │                                                 │
    │  Reasoning: OWL2-RL forward-chained, materialised│
@@ -441,22 +442,39 @@ The validation criterion isn't "the data loaded" — it's "the data
 loaded AND a property chain inference fires AND the SHACL validator
 caught at least one synthetic bad-row injection."
 
-# Phase 3 — Wikidata mirror (sketched)
+# Phase 3 — External knowledge graph mirrors (sketched)
 
-- One-shot bulk-load of the `latest-truthy.nt.bz2` dump into the
-  named graph `<http://wikidata.org/entity>` on Virtuoso. Expect
-  12-24 hours wall clock, run on the dev node, write to prod over
-  the network with `ld_dir_all`.
+Two named graphs, same dump-load cron pattern, separate operational
+schedules.
+
+**Wikidata mirror** (named graph `<http://wikidata.org/entity>`):
+- One-shot bulk-load of the `latest-truthy.nt.bz2` dump (~50 GB
+  compressed, ~500 GB loaded). Expect 12-24 hours wall clock, run on
+  the dev node, write to prod over the network with `ld_dir_all`.
 - Cron weekly: download new dump, load into a side graph, atomic
   `MOVE GRAPH` to swap the alias when load succeeds, drop the old
-  side graph. Same pattern Wikipedia mirrors use.
-- Document a few canonical federated query patterns:
+  side graph.
+- Canonical federated patterns to document:
   - "Enrich a Fontem Authority with Wikidata's biographical fields"
   - "Find Wikidata entities that match a Fontem Company by LEI"
   - "Cross-language label resolution via Wikidata's `rdfs:label`"
-- One smoke test: run the `eu-LISA` round-trip — fetch the Fontem
-  authority IRI, federate against Wikidata to retrieve its founding
-  date and director list, render in the UI.
+- Smoke: run the `eu-LISA` round-trip — fetch the Fontem authority
+  IRI, federate against Wikidata to retrieve its founding date and
+  director list, render in the UI.
+
+**EUKG / Kohesio mirror** (named graph `<http://linkedopendata.eu/entity>`):
+- Until this lands, Phases 2 / 4 / 5 use live federation against
+  `https://query.linkedopendata.eu/sparql` for any cohesion-project
+  details we don't carry locally. Sub-second latency typical, but
+  remote-dependent.
+- Same cron mechanics as Wikidata. The dump is much smaller (~1.83M
+  entities + supporting triples, expect a couple of GB compressed),
+  so the load completes in under an hour.
+- Once the mirror lands, the federation pattern moves to a local
+  cross-graph join (sub-100 ms instead of 1-3 s).
+- The bridge from our entities is `owl:sameAs <http://linkedopendata.eu/entity/Q…>`
+  emitted by the existing `wikibase_qid` field in the cohesion
+  loader (see Phase 2 / WS4 — no new ETL needed).
 
 # Phase 4 — Remaining ETLs (sketched)
 
