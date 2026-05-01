@@ -46,8 +46,18 @@ Per-label exact counts:
 | MergeEvent | 3,528 | meta (audit) | gmr-consolidator |
 | NUTSRegion | 1,808 | yes (taxonomy) | load_nuts |
 | LobbyInterest | 40 | yes | load_eu_lobbying |
-| Person | **0** | **declared but empty** | (intended for directors / lobby contacts) |
-| BeneficialOwner | **0** | **declared but empty** | (intended for ownership chains) |
+
+`Person` and `BeneficialOwner` were declared (UNIQUE constraints
+existed) but had zero nodes. **Dropped from the schema 2026-05-01
+per GDPR call** — Fontem deliberately does not store data about
+natural persons. Constraints removed from Neo4j with:
+
+```
+DROP CONSTRAINT person_id IF EXISTS;
+DROP CONSTRAINT bo_id    IF EXISTS;
+```
+
+These classes do not migrate to the new ontology.
 
 ## Per-label property catalog
 
@@ -302,11 +312,10 @@ in place.
 
 ## Constraints + indexes
 
-11 UNIQUE constraints (the identity properties):
+9 UNIQUE constraints (the identity properties), post-GDPR cleanup:
 
 ```
 Authority.authority_id
-BeneficialOwner.bo_id      ← unused (label has 0 nodes)
 CohesionProject.project_id
 Company.gmr_id
 Contract.ted_notice_id
@@ -314,9 +323,11 @@ CPV.code
 Listing.ticker
 Lobbyist.tr_id
 NUTSRegion.code
-Person.person_id           ← unused (label has 0 nodes)
 SanctionedEntity.entity_id
 ```
+
+(`Person.person_id` and `BeneficialOwner.bo_id` were dropped —
+see the labels table above.)
 
 Range/lookup indexes on Company secondary identifiers
 (`Company.cik`, `Company.lei`, `Company.historic_leis`); range
@@ -327,57 +338,75 @@ fulltext on `Company.name` (`company_name_ft`); vector on
 ## Hidden / surprise findings
 
 Things the live graph carries that the loader DDL didn't make
-obvious:
+obvious. Each finding is followed by the ✅ decision (call made
+2026-05-01).
 
-1. **`Person` and `BeneficialOwner` are declared but empty.** Both
-   have UNIQUE constraints in the live database; neither has any
-   nodes. **Action**: define the classes in the ontology anyway;
-   ETLs to populate them will land later.
+1. **`Person` and `BeneficialOwner` declared but empty.** Both had
+   UNIQUE constraints; neither had any nodes.
+   **✅ Decision: drop entirely.** Fontem deliberately does not
+   store data about natural persons (GDPR + scope). Constraints
+   already removed from Neo4j. These classes do not appear in the
+   ontology.
 
-2. **`SANCTIONED` rel does not exist in the live graph.** It's
-   declared in `load_eu_sanctions.py` as the predicate for
-   confident matches, but no edges exist. Either the resolver has
-   never produced a confident match, or matched candidates haven't
-   passed the human-review gate. **Action**: define the predicate
-   in the ontology; treat as no-op for the ETL pilot in Phase 2.
+2. **`SANCTIONED` rel does not exist in the live graph.** Declared
+   in `load_eu_sanctions.py` for confident matches; zero edges.
+   **✅ Decision: keep the predicate, accept zero is fine.**
+   Sanctions are defamation-class — a confident automated link
+   between a specific company and a sanctioned entity *is* a
+   journalism-grade story. Zero edges means no automated rule
+   has crossed that bar; if one ever does, the journalists handle
+   it. The predicate stays defined in the ontology so the loader
+   can write into it whenever the resolver produces a confident
+   hit.
 
-3. **`SUBSIDIARY_OF` carries a `type` property.** That's the only
-   non-summary relationship with edge attributes. Source: GLEIF
-   relationships loader. The `type` distinguishes
-   "DIRECT_PARENT" / "ULTIMATE_PARENT" / similar GLEIF semantics.
-   **Action**: in RDF, make this two distinct predicates
-   (`fontem:directParent` / `fontem:ultimateParent`) rather than
-   one with a discriminator property — cleaner for SPARQL queries.
+3. **`SUBSIDIARY_OF` carries a `type` property** (DIRECT_PARENT /
+   ULTIMATE_PARENT / etc. from GLEIF).
+   **✅ Decision: split into two predicates on port.** WS4 emits
+   `fontem:directParent` and `fontem:ultimateParent` instead of
+   one predicate with a discriminator. Cleaner SPARQL.
 
-4. **`REPORTED` carries `year` on the edge.** The actual fiscal
-   year is on the relationship, not the FinancialYear node.
-   That's a real edge attribute. **Action**: reify on port —
-   `Filing` as a class with `forYear` / `forCompany`
-   properties.
+4. **`REPORTED` carries `year` on the edge.** Real edge attribute.
+   **✅ Decision: reify on port.** `Filing` becomes a class with
+   `forCompany` / `forYear` / numeric properties. The current
+   `:FinancialYear` node merges into the reified Filing.
 
 5. **`CLIENT_OF` and `SUPPLIER_OF` are the eu-LISA bug class.**
-   Materialised summary edges with `contracts` / `total_eur` /
-   `earliest` / `latest` — exactly what the OWL property chain
-   replaces. **Action**: do not port these as stored predicates;
-   derive `fontem:client` / `fontem:supplier` from `awarded ∘
-   awardedTo` via `owl:propertyChainAxiom`. The reasoner produces
-   the existence; the count is `COUNT(?contract)` at query time.
+   84,315 materialised edges each.
+   **✅ Decision: derive via property chain, do not store.**
+   `fontem:client owl:propertyChainAxiom (fontem:awarded
+   fontem:awardedTo)`. The contract count becomes a query-time
+   `COUNT(?contract)`. The reasoner replaces
+   `materialize_trade_edges`.
 
-6. **One label not yet documented in `neo4j-mapping.md`**:
-   `LobbyInterest`. 40 nodes, single property `name`. Should
-   become a SKOS concept scheme, not a class with instances.
+6. **`LobbyInterest` (40 nodes, single `name` property)** is a
+   small controlled vocabulary, not a class with instances.
+   **✅ Decision: model as SKOS concept scheme** (`skos:Concept`,
+   `skos:prefLabel`).
 
-7. **`CohesionProject.wikibase_qid` is already a Wikidata link.**
-   This is the ONE property in the entire graph that already does
-   Wikidata alignment. **Action**: emit as `owl:sameAs wd:Q…`
-   directly during the port. Worked example for WS3.
+7. **`CohesionProject.wikibase_qid` is a `linkedopendata.eu`
+   Q-number** — the EU Knowledge Graph (EUKG), the EU's own
+   Wikibase instance for cohesion data, separate from Wikidata.
+   1.83M projects + 643K beneficiaries; ~10% cross-linked to
+   Wikidata. Hosted at `https://query.linkedopendata.eu/sparql`,
+   backed by qEndpoint.
+   **✅ Decision: align with EUKG, don't mint our own
+   `fontem:CohesionProject` class.**
+   - Phase 0 / WS4: emit `<our-iri> owl:sameAs
+     <http://linkedopendata.eu/entity/Q…>` for every cohesion
+     project we already carry.
+   - Phase 5 (read APIs): use `SERVICE
+     <https://query.linkedopendata.eu/sparql>` for live federation
+     when the API needs data we don't carry locally.
+   - Phase 3 (Wikidata mirror): same cron pattern adds an EUKG
+     mirror as a `<http://linkedopendata.eu/>` named graph in
+     Virtuoso, dropping federation latency for hot paths.
+   The `wikibase_qid` we already store is the bridge — no new ETL
+   needed for Phase 2; alignment is mechanical at write time.
 
-8. **24 multilingual columns per `Authority` and per `Contract`.**
-   ~860K name-label triples for Authorities alone, ~1.4M
-   title-label triples for Contracts. That's ~2M extra triples in
-   the data graph just for labels. Bounded but real. The Phase 0
-   plan's Q2 ("emit our own per-language labels") was the right
-   call — Wikidata wouldn't cover most of these entities.
+8. **24 multilingual columns per `Authority` and per `Contract`**
+   (~2M extra label triples on port).
+   **✅ Decision: emit our own per-language labels.** Bounded
+   cost; Wikidata wouldn't cover most of these entities.
 
 ## Deltas from `neo4j-mapping.md`
 
@@ -389,8 +418,11 @@ before this audit. Differences worth correcting in WS4:
 - `RuleApplication` was missing — add to the audit-only table
   (PROV-O Activity).
 - `ConsolidationRun` was missing — same, audit-only.
-- `BeneficialOwner` was missing — add as `fontem:BeneficialOwner`,
-  empty for now.
+- `BeneficialOwner` and `Person` rows were drafted; **drop**
+  per GDPR finding #1.
+- `CohesionProject` should align with EUKG (linkedopendata.eu),
+  not mint a `fontem:CohesionProject`. Use the existing
+  `wikibase_qid` to emit `owl:sameAs <http://linkedopendata.eu/entity/Q…>`.
 - `FinancialYear` should map to a reified `Filing` class, not a
   one-to-one port.
 - `SUBSIDIARY_OF.type` discriminator — split into two predicates,
@@ -405,8 +437,8 @@ WS3 takes this audit and matches every class / property in it to
 Wikidata terms (deep dive). Confidence-rated table; 5 worked
 examples. The starting set is:
 
-- 14 OWL classes to align (drop `Person` and `BeneficialOwner` —
-  they're empty so alignment is paper-only; do them anyway)
+- 12 OWL classes to align (Person + BeneficialOwner dropped per
+  GDPR; CohesionProject aligned with EUKG instead of Wikidata)
 - ~80 datatype / object properties to align
 - 2 SKOS concept schemes to align (CPV, LobbyInterest, NUTSRegion
   — 3 actually)
