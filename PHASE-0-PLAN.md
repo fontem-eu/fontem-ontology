@@ -33,12 +33,13 @@ These are what we agreed on before Phase 0 starts:
 
 ## Open questions (need your call before workstream 4 starts)
 
-1. **`fontem.eu` IRI host availability.** Is the domain pointed at
-   the prod cluster ingress already? If not, I'd want to confirm DNS
-   + cert + content-negotiation routing as part of Phase 0 (low
-   effort) rather than discover it during Phase 1. **Action: confirm
-   `curl -I https://fontem.eu/` returns *something* — even a 404
-   from the ingress is fine, we just need the domain reachable.**
+1. **IRI host (resolved by WS1, but flagging for visibility).**
+   `fontem.eu` and `www.fontem.eu` both currently resolve to a
+   Scaleway-hosted Kanboard installation, not the void42 cluster.
+   The recommended answer is a sub-domain (`data.fontem.eu` or
+   similar) routed separately to the cluster ingress, identical to
+   Wikidata's pattern. WS1 will commit to a concrete sub-domain
+   pre-Turtle authoring.
 
 2. **Multilingual labels density.** Authority names already get
    translated into 24 EU languages by the existing LaBSE pipeline.
@@ -91,21 +92,50 @@ These are what we agreed on before Phase 0 starts:
 
 ## Workstreams (sequenced)
 
-### Workstream 1 — DNS / IRI infrastructure verification (½ day)
+### Workstream 1 — IRI host decision (½ day)
 
-Before writing a single ontology line, confirm the IRI host works.
-Cheap to do early; expensive to discover broken in Phase 5.
+Probe done up front (see "DNS finding" below); resolves to a real
+question that needs an answer before WS4 writes the Turtle.
 
-- [ ] `curl -I https://fontem.eu/` → reaches the cluster
-- [ ] DNS A record points where we expect
-- [ ] TLS cert covers `fontem.eu` and `*.fontem.eu`
-- [ ] Plan content-negotiation routing on the ingress: same URL
-  serves Turtle (RDF clients) and HTML (browsers). Don't *implement*
-  yet, just sketch how it'll route in Phase 1.
+**DNS finding (May 2026):** `fontem.eu` and `www.fontem.eu` both
+resolve to `51.159.141.141` (Scaleway), which is currently serving
+a Kanboard installation (nginx 1.22.1, sets `KB_SID` cookie,
+redirects `/` → `/login`). The TLS cert does not include `fontem.eu`
+in its SAN. The void42 cluster ingress is not on this IP.
 
-Output: short note in `MIGRATION.md` confirming IRI host is good
-to go. If it isn't, this becomes a Phase 1 prerequisite and we
-proceed knowing it's in flight.
+So `http://fontem.eu/id/Authority/…` as the entity IRI base would
+dereference to a Kanboard login page — not what we want.
+
+**Three options:**
+
+1. **Re-point `fontem.eu` DNS** to the void42 cluster, migrate the
+   Kanboard somewhere else (or have nginx in the cluster proxy back
+   to it for `/kb` paths). Largest disruption.
+2. **Use a sub-domain on a separate route.** Pattern Wikidata uses
+   (`www.wikidata.org` for the site, `query.wikidata.org` for SPARQL,
+   entity IRIs `http://www.wikidata.org/entity/Q…` independent of
+   either). For Fontem: `http://data.fontem.eu/id/Authority/…` or
+   `http://kg.fontem.eu/…`. Lowest disruption — add a sub-domain to
+   the cluster ingress, no impact on whatever's at the apex. **My
+   recommendation.**
+3. **Different domain entirely.** Probably overkill.
+
+The output of WS1 is the IRI base locked. Whatever we pick is the
+single host string the entire ontology references; getting it right
+once is cheap, getting it wrong gets discovered three phases later
+when porting is half done.
+
+- [ ] Pick option (recommendation: 2, sub-domain)
+- [ ] Pick concrete sub-domain (`data.fontem.eu` / `kg.fontem.eu` /
+      `id.fontem.eu` — preference)
+- [ ] Add A/AAAA record pointing at the cluster ingress
+- [ ] Get a TLS cert via the existing cluster cert-manager
+- [ ] One-line `sed` across the repo to replace the placeholder
+- [ ] Sketch content-negotiation routing on the ingress (Turtle
+      vs HTML). Implementation lands in Phase 1; for Phase 0 we
+      just confirm the URL pattern works at all.
+
+Output: locked IRI base; one note pinned in `MIGRATION.md`.
 
 ### Workstream 2 — Neo4j schema audit (1-2 days)
 
@@ -239,15 +269,34 @@ Output: shape file + validation script + a fixture pair (one
 "good" sanctions entity, one "intentionally broken" one) that the
 script catches as expected.
 
-### Workstream 6 — End-to-end reasoner smoke (1 day)
+### Workstream 6 — End-to-end reasoner smoke + ontology CI (2 days)
 
-**The proof point.** Before Phase 1 starts, this must work.
+**The proof point AND a permanent CI deliverable.** Before Phase 1
+starts, this must work; from then on, every push to this repo
+re-runs it and gates merge on success.
 
-The smoke is intentionally tiny — hand-crafted Turtle, throwaway
-local Virtuoso in Docker, no real ETL involvement. The goal is
-*just* "does the reasoner produce the inferred triple from the
-property chain". If it doesn't, the design is wrong; figure that
-out *now*.
+The smoke is intentionally small — hand-crafted Turtle, dockerised
+Virtuoso, synthetic test data. The goal is *just* "does the
+reasoner produce the inferred triple from the property chain". If
+it doesn't, the design is wrong; figure that out *now*. After
+Phase 0 closes the smoke stays in the repo as a regression gate
+on the ontology — any future change to the TBox that breaks
+inference fails CI before merge.
+
+**Resource budget for the dockerised Virtuoso**: must be small.
+Cluster runners have limited headroom and CI has to share. Target
+shape:
+
+```
+NumberOfBuffers   = 32000      # ~256 MB working set
+MaxCheckpointRemap = 8000
+DefaultIsolation  = 2          # read committed
+ServerThreads     = 4          # smoke is single-client
+```
+
+That's a ~512 MB total memory footprint for the test container.
+Loads the test data + reasons in seconds, lets a CI runner finish
+in well under a minute.
 
 Test data:
 
@@ -331,17 +380,38 @@ SELECT ?wdLabel WHERE {
 }
 ```
 
-Tooling:
+Repo deliverables (kept; CI-runnable):
 
-- Local Virtuoso 7.2 in Docker (`openlink/virtuoso-opensource-7`)
-- `isql` to load Turtle and run queries
-- A bash script `tools/phase-0-smoke.sh` that brings up the
-  container, loads fixtures, runs the queries, asserts results,
-  tears down
+- `tools/smoke/Dockerfile` — Virtuoso image pinned to a known
+  version, `virtuoso.ini` baked in with the small-memory tuning
+  above. Image is ~150 MB, comparable to a Postgres image.
+- `tools/smoke/fixtures/*.ttl` — synthetic test data (the worked
+  example above; expanded as new domain TBoxes land — corporate,
+  lobbying, sanctions each get their own fixture file).
+- `tools/smoke/queries/*.sparql` — verification queries, one per
+  invariant being checked.
+- `tools/smoke/run.sh` — driver: starts the container, loads the
+  TBox + fixtures, waits for the reasoner to materialise, runs
+  each query, diffs against the expected output, exits non-zero
+  on any mismatch.
+- `.gitea/workflows/ci.yml` — runs `tools/smoke/run.sh` on every
+  push and pull-request. Merge to `main` is gated on green.
 
-Output: smoke script + green run captured in CI (or as a
-checked-in `tools/phase-0-smoke.expected.txt`). When this passes,
-**Phase 0 is done and Phase 1 starts.**
+What "permanent CI gate" buys us beyond Phase 0:
+
+- Any future change to a `*.ttl` file that breaks the property
+  chain or sameAs inference fails CI *before* merge — same shape
+  as the schema-parity test we already have between the assistant's
+  Python tool enum and the JS-side advertised actions.
+- New domain ontologies (corporate, lobbying, when they land) each
+  add a fixture file + a query file + a couple of expected
+  inferences. Reasoning regressions across domains get caught the
+  same way.
+- When ETL writers come online in Phase 4, every loader can
+  contribute a "loader output sample" fixture, and the same CI
+  harness validates that real-shaped data inferences correctly.
+
+When this CI is green, **Phase 0 is done and Phase 1 starts.**
 
 ---
 
@@ -368,7 +438,12 @@ When Phase 0 closes we have:
 
 Phase 1 inherits all of these and turns them into running infra.
 
-## Sequence + tentative timeline (one focused engineer)
+## Sequence + tentative timeline
+
+Single-threaded execution. Workstreams run strictly in order;
+each one finishes before the next starts. (Other Fontem work
+will continue in parallel on unrelated matters — that's
+orthogonal.)
 
 ```
 Day 1     WS1: DNS/IRI verification
@@ -376,27 +451,30 @@ Days 2-3  WS2: Neo4j schema audit
 Days 4-7  WS3: Wikidata alignment deep dive  ← top priority, biggest spend
 Days 8-11 WS4: Turtle TBox authoring (one domain file per day)
 Day 12    WS5: SHACL shapes for sanctions pilot
-Day 13    WS6: Reasoner smoke
-Day 14    Review buffer; address findings; close-out
+Days 13-14  WS6: Reasoner smoke + CI deliverable
+Day 15    Review buffer; address findings; close-out
 ```
 
-Two-week phase, with WS3 the dominant chunk. WS3 and WS4 can
-overlap modestly — once an alignment for a class is locked, you
-can write its Turtle while moving onto the next class's
-alignment.
+~3 weeks of effort once spread across non-Fontem-Phase-0 work.
+WS3 dominates. WS6 is now 2 days because it's a permanent
+CI deliverable, not a throwaway.
 
-## Approval points (need your sign-off before this plan executes)
+## Approval points
 
-1. Phase 0 scope as defined above — anything missing?
-2. The pilot split (Phase 0 reasoner smoke = hand-crafted; Phase 2
-   ETL pilot = sanctions) — agree?
-3. Recommendation on multilingual labels (emit our own per-language
-   triples; don't depend on Wikidata for label resolution) — agree?
-4. Recommendation on CPV alignment depth (self-contained for now,
-   alignment as follow-up) — agree?
-5. Workstream sequencing — anything you'd reorder?
-6. Timeline — does ~2 weeks match your runway expectations, or
-   should we compress / expand specific workstreams?
+Single-pass approval — I'll merge once you confirm:
 
-When you're happy with the plan, I'll merge it onto main and start
-Workstream 1.
+1. **Phase 0 scope** — six workstreams, single-threaded, ~3 weeks.
+2. **The pilot split** — Phase 0 ships a permanent CI-gated reasoner
+   smoke (dockerised Virtuoso, ~512 MB, lives in `tools/smoke/`);
+   Phase 2 ETL pilot stays as sanctions for the loader-infra test.
+3. **IRI host strategy** — sub-domain (option 2 in WS1), concrete
+   sub-domain to be picked in WS1 day-1.
+4. **Multilingual labels** — emit our own `rdfs:label "..."@xx`
+   triples per entity (don't depend on Wikidata for label resolution).
+5. **CPV alignment depth** — self-contained vocabulary for Phase 0,
+   Wikidata cross-links as follow-up.
+6. **Single-threaded execution** — no parallel workstreams within
+   Phase 0 (other Fontem work continues on unrelated matters; that's
+   fine).
+
+Reply approved/changes and I'll merge onto main and start WS1.
