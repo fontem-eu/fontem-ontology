@@ -9,14 +9,14 @@
 # Other domain TBoxes (procurement.ttl, corporate.ttl, etc.) import
 # this file via owl:imports.
 
-@prefix fontem:   <http://fontem.void42.net/ontology#> .
+@prefix fontem:   <http://data.fontem.eu/ontology#> .
 @prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl:      <http://www.w3.org/2002/07/owl#> .
 @prefix wd:       <http://www.wikidata.org/entity/> .
 @prefix wdt:      <http://www.wikidata.org/prop/direct/> .
 
-<http://fontem.void42.net/ontology>
+<http://data.fontem.eu/ontology>
     a owl:Ontology ;
     rdfs:label "Fontem core ontology"@en ;
     rdfs:comment "Top of the class hierarchy and shared properties."@en ;

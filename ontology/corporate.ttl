@@ -5,17 +5,17 @@
 # Scope: Company, Listing, ownership chain (transitive),
 # LEI / ISIN / ticker identifiers, alignment with GLEIF + EDGAR + ESEF.
 
-@prefix fontem:   <http://fontem.void42.net/ontology#> .
+@prefix fontem:   <http://data.fontem.eu/ontology#> .
 @prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl:      <http://www.w3.org/2002/07/owl#> .
 @prefix wd:       <http://www.wikidata.org/entity/> .
 @prefix wdt:      <http://www.wikidata.org/prop/direct/> .
 
-<http://fontem.void42.net/ontology/corporate>
+<http://data.fontem.eu/ontology/corporate>
     a owl:Ontology ;
     rdfs:label "Fontem corporate ontology"@en ;
-    owl:imports <http://fontem.void42.net/ontology> ;
+    owl:imports <http://data.fontem.eu/ontology> ;
     owl:versionInfo "0.0.1-draft" .
 
 # TBox to be filled in during Phase 0.
