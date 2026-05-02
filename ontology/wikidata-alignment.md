@@ -262,11 +262,23 @@ their endpoint with sample queries.)
 These are things WS3 noted but doesn't lock now — too speculative
 without seeing live data shapes during ETL port:
 
-1. **`Listing` vs `Company`'s `wdt:P414`**: should the *Company*
-   carry `wdt:P414 ?exchange`, or the *Listing* node carry it?
-   Wikidata models this as a Company property. We'd lose the
-   ticker-as-node abstraction. Decide during the corporate ETL
-   port.
+1. **`Listing` vs `Company`'s `wdt:P414`** (resolved). Decision:
+   **emit both**.
+   - `:Company wdt:P414 <exchange>` — direct Wikidata-style
+     statement; multi-valued (P414 has no single-value constraint,
+     so a dual-listed company can carry several). Required for
+     federated queries that walk via Wikidata's vocabulary.
+   - `:Listing` stays as a class — it's how we carry the
+     (ticker, exchange, ISIN, currency) tuple per security, which
+     Wikidata models as qualifiers on the P414 statement (awkward
+     in plain RDF). Our Listing node is the explicit reification.
+   - Linking: `:Company fontem:listedAs :Listing ;
+                       wdt:P414 <wikidata-exchange-Q-number>`.
+     One `wdt:P414` per `:Listing`'s exchange, with the same
+     wikidata exchange Q-number.
+   ETL implementation: corporate loader needs a small
+   `exchange-code → wd:Q-number` lookup table (NASDAQ → Q82059,
+   LSE → Q171240, etc.). Build during the corporate ETL port.
 
 2. **OpenSanctions cross-walk**: `wdt:P10632` is OpenSanctions ID
    on Wikidata. Should we also emit `wdt:P10632` for our

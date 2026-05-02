@@ -18,8 +18,10 @@ ENV VIRT_Parameters_NumberOfBuffers=32000 \
     DBA_PASSWORD=fontem-smoke-dba
 
 # TBox + fixtures baked in. Order: ontology before fixtures so
-# image-cache invalidation is granular per area.
-COPY ontology/        /import/ontology/
+# image-cache invalidation is granular per area. Fixtures live at
+# tools/smoke/fixtures/ (shared across engines); the Virtuoso-specific
+# Dockerfile + run.sh + post-load.sparql are in this directory.
+COPY ontology/             /import/ontology/
 COPY tools/smoke/fixtures/ /import/fixtures/
 
 # Healthcheck: SPARQL endpoint up + responding.

@@ -1,0 +1,48 @@
+# Fuseki assembler config — in-memory dataset wrapped in an InfModel
+# with a custom Jena rules reasoner.
+#
+# Why a custom rules file rather than the bundled OWLFBRuleReasoner:
+# Jena's OWL/Lite reasoner does not implement owl:propertyChainAxiom
+# (OWL2 RL feature added after the bundled reasoners were written).
+# So even though we declare the chain in procurement.ttl, the
+# bundled reasoner ignores it.
+#
+# The clean Jena answer: a GenericRuleReasoner with a rules file that
+# implements the chain (and any other chains we add later). That file
+# lives at tools/smoke/fuseki/rules.txt and is mounted into the
+# container.
+#
+# Compared to Virtuoso's "post-load SPARQL INSERT" workaround, this
+# is a real reasoner — rules fire on every query, including across
+# updates, with no one-shot materialisation drift risk.
+
+@prefix :        <#> .
+@prefix fuseki:  <http://jena.apache.org/fuseki#> .
+@prefix ja:      <http://jena.hpl.hp.com/2005/11/Assembler#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+[] rdf:type fuseki:Server .
+
+<#service>
+    rdf:type fuseki:Service ;
+    fuseki:name "fontem" ;
+    fuseki:serviceQuery              "sparql", "query" ;
+    fuseki:serviceUpdate             "update" ;
+    fuseki:serviceUpload             "upload" ;
+    fuseki:serviceReadWriteGraphStore "data" ;
+    fuseki:dataset <#dataset> .
+
+<#dataset>
+    rdf:type ja:RDFDataset ;
+    ja:defaultGraph <#inf_model> .
+
+<#inf_model>
+    rdf:type ja:InfModel ;
+    ja:reasoner [
+        ja:reasonerURL <http://jena.hpl.hp.com/2003/GenericRuleReasoner> ;
+        ja:rulesFrom   <file:///fuseki-config/rules.txt> ;
+    ] ;
+    ja:baseModel <#mem_model> .
+
+<#mem_model>
+    rdf:type ja:MemoryModel .
