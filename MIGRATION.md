@@ -554,42 +554,35 @@ side before applying the PVs. Same step we did for Neo4j's PVs.
   query, validate the result matches a pre-recorded snapshot.
   Documented runbook in `infra/runbooks/virtuoso-restore.md`.
 
-## 1.6 TLS via cert-manager + Vault PKI
+## 1.6 TLS posture (no in-cluster TLS for the data tier)
 
-The `vault-issuer` ClusterIssuer is already running in the cluster
-(verified). cert-manager mints a cert for Virtuoso's
-cluster-internal hostname:
+Public traffic terminates TLS at the Scaleway bastion:
+`data.fontem.eu` → bastion nginx (TLS) → cluster NodePort 31457 →
+Virtuoso on port 8890 (HTTP). Unchanged from Phase 0.
 
-```yaml
-# certificate.yaml
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: virtuoso-tls
-  namespace: gmr
-spec:
-  secretName: virtuoso-tls
-  issuerRef:
-    name: vault-issuer
-    kind: ClusterIssuer
-  dnsNames:
-    - virtuoso.gmr.svc.cluster.local
-    - virtuoso
-  duration: 720h     # 30 days
-  renewBefore: 168h  # 7 days
-```
+In-cluster traffic (ETL writers, consolidator, gmr-api → Virtuoso)
+runs plain HTTP on `http://virtuoso.gmr.svc.cluster.local:8890`.
+That matches the existing data-tier pattern: Neo4j and Postgres
+both have `linkerd.io/inject: disabled` and serve plain protocols
+internally. The cluster network is treated as trusted; no
+in-cluster TLS is load-bearing for the data tier.
 
-Virtuoso terminates HTTPS on port 8443 using the Secret-mounted
-cert; HTTP stays on 8890 for the bastion forward. In-cluster
-clients (ETL writers, consolidator, gmr-api) talk to
-`https://virtuoso.gmr.svc.cluster.local:8443/sparql`. The existing
-linkerd mesh provides additional mTLS at the pod-to-pod layer for
-free; cert-manager handles the certificate Virtuoso itself
-presents.
+The first plan-iteration assumed cert-manager + the existing
+`vault-issuer` could mint an internal cert for
+`virtuoso.gmr.svc.cluster.local`. Verifying against the live PKI
+showed otherwise: the role `pki_int/sign/void42-internal` only
+permits `*.void42.internal` and `*.void42.net` SANs.
+`*.svc.cluster.local` would be rejected. Three ways out, in order
+of preference:
 
-Public traffic flow remains: `data.fontem.eu` → bastion (TLS
-terminated by user-managed nginx) → cluster NodePort 31457 → port
-8890 (HTTP, internal). No public exposure of port 8443.
+1. **(picked) Skip in-cluster TLS for the data tier.** Match Neo4j.
+2. Opt Virtuoso into the linkerd mesh — automatic mTLS, no PKI
+   change. Out of scope for Phase 1; revisit if any in-cluster
+   client genuinely requires encrypted transport.
+3. Extend the PKI role to allow `*.svc.cluster.local`. One Vault
+   CLI command, but a policy decision that touches the whole
+   cluster's PKI shape — not the right call to make as a side
+   effect of standing up one service.
 
 ## 1.7 Auth
 

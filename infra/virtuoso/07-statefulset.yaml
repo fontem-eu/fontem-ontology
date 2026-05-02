@@ -26,6 +26,13 @@ spec:
     metadata:
       labels:
         app: virtuoso
+      annotations:
+        # Match Neo4j + the rest of the data tier — long-running
+        # stateful workloads stay out of the linkerd mesh because
+        # the sidecar lifecycle complicates startup ordering and
+        # the data-tier traffic is in-cluster only (no Internet
+        # exposure that would make mTLS load-bearing).
+        linkerd.io/inject: disabled
     spec:
       terminationGracePeriodSeconds: 60
       securityContext:
@@ -67,9 +74,6 @@ spec:
               mountPath: /opt/virtuoso-opensource/database/virtuoso.ini
               subPath: virtuoso.ini
               readOnly: true
-            - name: tls
-              mountPath: /etc/virtuoso/tls
-              readOnly: true
           startupProbe:
             tcpSocket: { port: 8890 }
             initialDelaySeconds: 10
@@ -98,10 +102,6 @@ spec:
             name: virtuoso-config
             items:
               - { key: virtuoso.ini, path: virtuoso.ini }
-        - name: tls
-          secret:
-            secretName: virtuoso-tls
-            optional: true
 ---
 # Headless Service for the StatefulSet's stable DNS name. ETLs and
 # the consolidator address virtuoso via the regular ClusterIP

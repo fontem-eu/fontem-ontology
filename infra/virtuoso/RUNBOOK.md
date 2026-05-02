@@ -28,16 +28,28 @@
    The VSO sync into `virtuoso-credentials` Secret happens
    automatically once `05-secret-dba.yaml` is applied.
 
-3. **Vault PKI role** for the cert-manager `vault-issuer` should
-   already permit `*.gmr.svc.cluster.local`. If not, add the role
-   to the existing PKI mount per the cluster runbook.
+## TLS posture
+
+In-cluster traffic between ETL writers / consolidator / gmr-api
+and Virtuoso is plain HTTP on port 8890. Matches the existing
+data-tier pattern (Neo4j has linkerd-injection disabled too) — the
+cluster network is treated as trusted, and no in-cluster TLS is
+load-bearing for the data tier.
+
+The vault-issuer's PKI role (`pki_int/sign/void42-internal`) only
+permits `*.void42.internal` and `*.void42.net` SANs, not
+`*.svc.cluster.local`. Trying to mint a cert for the cluster-DNS
+name would just fail. If we ever want in-cluster TLS, the right
+move is opting in to linkerd (the mesh handles mTLS itself);
+that's a future call, not Phase 1 work.
+
+Public traffic stays bastion-terminated: data.fontem.eu →
+Scaleway nginx (TLS) → cluster NodePort 31457 → port 8890 (HTTP).
 
 ## Apply order
 
 Files are numerically prefixed for sequencing. Apply in order;
-each step waits on the previous. (`virtuoso-data-pv` must exist
-before the PVC binds; the Cert needs the Issuer; the StatefulSet
-needs the Secret + ConfigMap + PVCs + Cert.)
+each step waits on the previous.
 
 ```
 kubectl apply -f 01-pv-data.yaml
@@ -46,8 +58,6 @@ kubectl apply -f 03-pvcs.yaml
 kubectl apply -f 04-configmap-ini.yaml
 kubectl apply -f 05-secret-dba.yaml          # VSO populates Secret
 kubectl wait --for=condition=ready vaultstaticsecret/virtuoso-credentials -n gmr --timeout=2m
-kubectl apply -f 06-certificate.yaml
-kubectl wait --for=condition=ready certificate/virtuoso-tls -n gmr --timeout=2m
 kubectl apply -f 07-statefulset.yaml
 kubectl rollout status statefulset/virtuoso -n gmr --timeout=5m
 
