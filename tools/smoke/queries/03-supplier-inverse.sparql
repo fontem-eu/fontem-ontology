@@ -1,0 +1,13 @@
+# Q3 — fontem:supplier is owl:inverseOf fontem:client; reasoner
+# must materialise the inverse without us asserting it.
+# Expected from co-2's perspective: 2 rows (auth-1, auth-2).
+#
+# Note: full IRI <...> instead of fontem-id:Company/co-2 because
+# Turtle/SPARQL strict parser rejects `/` in PN_LOCAL.
+
+PREFIX fontem: <http://data.fontem.eu/ontology#>
+
+SELECT DISTINCT ?auth WHERE {
+  <http://data.fontem.eu/id/Company/co-2> fontem:supplier ?auth .
+}
+ORDER BY ?auth

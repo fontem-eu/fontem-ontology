@@ -1,25 +1,141 @@
-# Meta ontology — provenance, versioning, audit trail.
+# Meta ontology — provenance, audit trail, consolidation history.
 #
-# Status: stub. Populated during Phase 0.
+# These triples live in a separate `<http://data.fontem.eu/graph/meta>`
+# named graph, NOT the main data graph. Aligns with W3C PROV-O so
+# that every assertion in the data graph is traceable back to:
 #
-# Scope: PROV-O alignment for DataSource, LoadEvent, MergeEvent,
-# DecisionLog. The "who said what, when, derived from where" graph
-# that lives parallel to the data graph.
+#   - the DataSource it came from (which loader / which upstream)
+#   - the LoadEvent that wrote it (when, with which version)
+#   - the ConsolidationRun that may have rewired it (canonical merges)
+#   - the RuleApplication and DecisionLog that recorded WHY
+#
+# The Neo4j-era equivalents (DataSource, LoadEvent, MergeEvent,
+# DecisionLog, RuleApplication, ConsolidationRun nodes) port here
+# as PROV-O Activities and Entities.
 
-@prefix fontem:   <http://data.fontem.eu/ontology#> .
-@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix owl:      <http://www.w3.org/2002/07/owl#> .
-@prefix prov:     <http://www.w3.org/ns/prov#> .
-@prefix dcterms:  <http://purl.org/dc/terms/> .
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix rdf:       <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:       <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix prov:      <http://www.w3.org/ns/prov#> .
+@prefix dcterms:   <http://purl.org/dc/terms/> .
 
 <http://data.fontem.eu/ontology/meta>
     a owl:Ontology ;
-    rdfs:label "Fontem provenance + meta ontology"@en ;
-    owl:imports <http://data.fontem.eu/ontology> ;
-    owl:versionInfo "0.0.1-draft" .
+    rdfs:label    "Fontem provenance + meta ontology"@en ;
+    owl:imports   <http://data.fontem.eu/ontology> ;
+    owl:versionInfo "0.1.0" .
 
-# TBox to be filled in during Phase 0.
-# Reference axioms (drafted in MIGRATION.md):
-#   fontem:DataSource    rdfs:subClassOf prov:Entity .
-#   fontem:LoadEvent     rdfs:subClassOf prov:Activity .
+# ─── Classes ──────────────────────────────────────────────────────
+
+fontem:DataSource
+    a owl:Class ;
+    rdfs:label    "Data source"@en ;
+    rdfs:comment  "An upstream provider of records (TED, GLEIF, EU Sanctions, etc.). Each loader publishes one DataSource."@en ;
+    rdfs:subClassOf prov:Entity .
+
+fontem:LoadEvent
+    a owl:Class ;
+    rdfs:label    "Load event"@en ;
+    rdfs:comment  "A single execution of an ETL loader. Carries start/end timestamps, record counts, version of the loader image."@en ;
+    rdfs:subClassOf prov:Activity .
+
+fontem:ConsolidationRun
+    a owl:Class ;
+    rdfs:label    "Consolidation run"@en ;
+    rdfs:comment  "A batch sweep of the consolidator over an entity type (Authority, Company). Aggregates one-or-more RuleApplications."@en ;
+    rdfs:subClassOf prov:Activity .
+
+fontem:RuleApplication
+    a owl:Class ;
+    rdfs:label    "Rule application"@en ;
+    rdfs:comment  "The firing of a single consolidation rule on a candidate pair. Produces zero or more DecisionLog entries."@en ;
+    rdfs:subClassOf prov:Activity .
+
+fontem:DecisionLog
+    a owl:Class ;
+    rdfs:label    "Decision log"@en ;
+    rdfs:comment  "A single decision recorded by a rule (merge / link / flag / enrich). Audit-trail entity, immutable."@en ;
+    rdfs:subClassOf prov:Entity .
+
+fontem:MergeEvent
+    a owl:Class ;
+    rdfs:label    "Merge event"@en ;
+    rdfs:comment  "Records a node merge — canonical_id, merged_id, method, reviewer (if manual). Entity-class because a merge is the *thing* being annotated, not the act of merging itself."@en ;
+    rdfs:subClassOf prov:Entity .
+
+# ─── Object properties ────────────────────────────────────────────
+#
+# We use PROV-O predicates directly (prov:wasGeneratedBy,
+# prov:wasDerivedFrom, prov:used, prov:startedAtTime,
+# prov:endedAtTime, prov:wasAssociatedWith). Only Fontem-specific
+# meta-predicates are defined here.
+
+fontem:appliedRule
+    a owl:ObjectProperty ;
+    rdfs:label    "applied rule"@en ;
+    rdfs:comment  "ConsolidationRun → RuleApplication (the APPLIED edge from Neo4j)."@en ;
+    rdfs:domain   fontem:ConsolidationRun ;
+    rdfs:range    fontem:RuleApplication .
+
+fontem:producedDecision
+    a owl:ObjectProperty ;
+    rdfs:label    "produced decision"@en ;
+    rdfs:comment  "RuleApplication → DecisionLog (the PRODUCED edge from Neo4j)."@en ;
+    rdfs:domain   fontem:RuleApplication ;
+    rdfs:range    fontem:DecisionLog .
+
+# ─── SAME_AS bifurcation ──────────────────────────────────────────
+#
+# In Neo4j the `:SAME_AS` edge served two distinct purposes: it was
+# both the consolidator's review queue (proposed merges awaiting
+# human approval) and the post-merge equivalence statement. The
+# reasoner can't safely treat unreviewed candidates as full
+# equivalences without producing false materialisations. So:
+#
+# - `fontem:proposedSameAs` — review queue. Reasoner ignores; the
+#   UI surfaces these for human decision.
+# - `owl:sameAs` — approved equivalence. Built-in OWL semantics.
+#
+# Approval flips one edge to the other.
+
+fontem:proposedSameAs
+    a owl:ObjectProperty , owl:SymmetricProperty ;
+    rdfs:label    "proposed same as"@en ;
+    rdfs:comment  "Two entities are CANDIDATES for a same-as merge but have not been reviewed yet. The reasoner must not treat this as an equivalence — that's owl:sameAs's job. Carries detection metadata in adjacent triples (rule, confidence, detected_at)."@en .
+
+# Non-merge: explicit rejection, sticky once asserted.
+fontem:rejectedSameAs
+    a owl:ObjectProperty , owl:SymmetricProperty ;
+    rdfs:label    "rejected same as"@en ;
+    rdfs:comment  "Reviewer explicitly rejected the same-as candidate. Suppresses re-detection of the same pair."@en .
+
+# ─── Datatype properties ──────────────────────────────────────────
+
+fontem:detectionRule
+    a owl:DatatypeProperty ;
+    rdfs:label    "detection rule"@en ;
+    rdfs:comment  "Name of the consolidator rule that produced a same-as candidate (e.g. 'fuzzy_name_same_country')."@en ;
+    rdfs:range    xsd:string .
+
+fontem:detectionConfidence
+    a owl:DatatypeProperty ;
+    rdfs:label    "detection confidence"@en ;
+    rdfs:range    xsd:decimal .
+
+fontem:detectionDate
+    a owl:DatatypeProperty ;
+    rdfs:label    "detection date"@en ;
+    rdfs:range    xsd:dateTime .
+
+fontem:reviewer
+    a owl:DatatypeProperty ;
+    rdfs:label    "reviewer"@en ;
+    rdfs:comment  "Identifier of the human reviewer who acted on a same-as candidate."@en ;
+    rdfs:range    xsd:string .
+
+fontem:reviewedAt
+    a owl:DatatypeProperty ;
+    rdfs:label    "reviewed at"@en ;
+    rdfs:range    xsd:dateTime .

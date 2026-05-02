@@ -1,0 +1,12 @@
+# Q4 — class hierarchy must be materialised. Authority is a
+# subclass of Organisation and Agent (per core.ttl).
+# Reasoner must produce inferred type triples up the hierarchy.
+# Expected: auth-1 has type fontem:Authority AND fontem:Organisation
+# AND fontem:Agent.
+
+PREFIX fontem: <http://data.fontem.eu/ontology#>
+
+SELECT DISTINCT ?type WHERE {
+  <http://data.fontem.eu/id/Authority/auth-1> a ?type .
+}
+ORDER BY ?type

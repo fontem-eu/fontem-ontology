@@ -1,21 +1,184 @@
-# Corporate ontology — Companies, ownership, listings.
+# Corporate ontology — Companies, listings, ownership, financial filings.
 #
-# Status: stub. Populated during Phase 0.
-#
-# Scope: Company, Listing, ownership chain (transitive),
-# LEI / ISIN / ticker identifiers, alignment with GLEIF + EDGAR + ESEF.
+# Sources: GLEIF (LEIs + parent relationships), SEC EDGAR (US filings),
+# ESEF (EU filings), FIRDS (ISIN-keyed listings), EU Listings.
 
-@prefix fontem:   <http://data.fontem.eu/ontology#> .
-@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix owl:      <http://www.w3.org/2002/07/owl#> .
-@prefix wd:       <http://www.wikidata.org/entity/> .
-@prefix wdt:      <http://www.wikidata.org/prop/direct/> .
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix rdf:       <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:       <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix wd:        <http://www.wikidata.org/entity/> .
+@prefix wdt:       <http://www.wikidata.org/prop/direct/> .
 
 <http://data.fontem.eu/ontology/corporate>
     a owl:Ontology ;
-    rdfs:label "Fontem corporate ontology"@en ;
-    owl:imports <http://data.fontem.eu/ontology> ;
-    owl:versionInfo "0.0.1-draft" .
+    rdfs:label    "Fontem corporate ontology"@en ;
+    owl:imports   <http://data.fontem.eu/ontology> ;
+    owl:versionInfo "0.1.0" .
 
-# TBox to be filled in during Phase 0.
+# ─── Classes ──────────────────────────────────────────────────────
+
+fontem:Company
+    a owl:Class ;
+    rdfs:label    "Company"@en ;
+    rdfs:comment  "A legal entity — a corporation, partnership, sole proprietorship or similar registered organisation."@en ;
+    rdfs:subClassOf fontem:Organisation , wd:Q783794 .
+
+fontem:Listing
+    a owl:Class ;
+    rdfs:label    "Listing"@en ;
+    rdfs:comment  "A security as listed on a stock exchange — the security itself, not the company. Identified by ticker.exchange (e.g. AAPL.NASDAQ) and ISIN."@en ;
+    rdfs:subClassOf wd:Q798505 .
+
+fontem:Filing
+    a owl:Class ;
+    rdfs:label    "Financial filing"@en ;
+    rdfs:comment  "A formal financial report filed by a Company for a specific fiscal year — 10-K (US/EDGAR), ESEF report (EU), GLEIF disclosure. Reified from the Neo4j-era ':REPORTED' edge attribute (year was stored on the relation)."@en ;
+    rdfs:subClassOf fontem:Document , wd:Q192907 .
+
+# ─── Object properties — listings ────────────────────────────────
+
+fontem:listedAs
+    a owl:ObjectProperty ;
+    rdfs:label    "listed as"@en ;
+    rdfs:comment  "A Company is listed under a Listing (the listed security on an exchange)."@en ;
+    rdfs:domain   fontem:Company ;
+    rdfs:range    fontem:Listing .
+
+# ─── Object properties — ownership ───────────────────────────────
+#
+# SUBSIDIARY_OF.type discriminator (DIRECT_PARENT / ULTIMATE_PARENT
+# from GLEIF) becomes two distinct predicates rather than one
+# property with a discriminator value — cleaner SPARQL.
+
+fontem:directParent
+    a owl:ObjectProperty ;
+    rdfs:label    "direct parent"@en ;
+    rdfs:comment  "The immediate parent organisation (one hop). From GLEIF's DIRECT_PARENT relationship type."@en ;
+    rdfs:domain   fontem:Company ;
+    rdfs:range    fontem:Company ;
+    rdfs:subPropertyOf wdt:P749 .
+
+fontem:ultimateParent
+    a owl:ObjectProperty , owl:TransitiveProperty ;
+    rdfs:label    "ultimate parent"@en ;
+    rdfs:comment  "The ultimate (transitive) parent at the top of the ownership chain. From GLEIF's ULTIMATE_PARENT relationship type."@en ;
+    rdfs:domain   fontem:Company ;
+    rdfs:range    fontem:Company ;
+    rdfs:subPropertyOf wdt:P749 .
+
+# ─── Object properties — filings (reified from REPORTED edge) ────
+
+fontem:filedBy
+    a owl:ObjectProperty , owl:FunctionalProperty ;
+    rdfs:label    "filed by"@en ;
+    rdfs:comment  "The Company that filed this report. Reified from the REPORTED edge."@en ;
+    rdfs:domain   fontem:Filing ;
+    rdfs:range    fontem:Company .
+
+fontem:fiscalYear
+    a owl:DatatypeProperty , owl:FunctionalProperty ;
+    rdfs:label    "fiscal year"@en ;
+    rdfs:comment  "The fiscal year this Filing reports on. Was the 'year' attribute on the REPORTED edge in the Neo4j-era model."@en ;
+    rdfs:domain   fontem:Filing ;
+    rdfs:range    xsd:gYear .
+
+# ─── Datatype properties — Companies ─────────────────────────────
+#
+# LEI, VAT, ISIN, ticker, CIK use Wikidata predicates directly.
+# Listed below for documentation only; we do NOT mint Fontem
+# wrappers.
+#
+#   wdt:P1278   — LEI                    (on Company)
+#   wdt:P3608   — EU VAT number          (on Company)
+#   wdt:P5531   — SEC CIK                (on Company)
+#   wdt:P946    — ISIN                   (on Listing)
+#   wdt:P249    — ticker symbol          (on Listing)
+#   wdt:P414    — stock exchange         (on Listing — qualified by P249 in Wikidata pattern)
+#   wdt:P571    — inception              (on Company)
+#   wdt:P576    — dissolution            (on Company)
+
+fontem:legalForm
+    a owl:DatatypeProperty ;
+    rdfs:label    "legal form"@en ;
+    rdfs:comment  "GLEIF-style legal-form code (e.g. XJHM)."@en ;
+    rdfs:domain   fontem:Company ;
+    rdfs:range    xsd:string .
+
+fontem:active
+    a owl:DatatypeProperty ;
+    rdfs:label    "active"@en ;
+    rdfs:comment  "Whether the legal entity is currently active (per GLEIF or upstream registry)."@en ;
+    rdfs:domain   fontem:Company ;
+    rdfs:range    xsd:boolean .
+
+fontem:historicLei
+    a owl:DatatypeProperty ;
+    rdfs:label    "historic LEI"@en ;
+    rdfs:comment  "An LEI that previously identified this company (successor merge — replaced by the current LEI)."@en ;
+    rdfs:domain   fontem:Company ;
+    rdfs:range    xsd:string .
+
+# ─── Datatype properties — Listings ──────────────────────────────
+
+fontem:exchange
+    a owl:DatatypeProperty ;
+    rdfs:label    "exchange"@en ;
+    rdfs:comment  "Exchange code (e.g. NASDAQ, AS, DE). Identifier-shape predicate; for the linked Wikidata exchange entity see wdt:P414."@en ;
+    rdfs:domain   fontem:Listing ;
+    rdfs:range    xsd:string .
+
+fontem:currency
+    a owl:DatatypeProperty ;
+    rdfs:label    "currency"@en ;
+    rdfs:comment  "Trading currency code (ISO 4217)."@en ;
+    rdfs:domain   fontem:Listing ;
+    rdfs:range    xsd:string .
+
+fontem:listingActive
+    a owl:DatatypeProperty ;
+    rdfs:label    "listing active"@en ;
+    rdfs:comment  "Whether the security is currently traded."@en ;
+    rdfs:domain   fontem:Listing ;
+    rdfs:range    xsd:boolean .
+
+# ─── Datatype properties — Filings ───────────────────────────────
+# (revenue, net_income, total_assets, …)
+#
+# These are all xsd:decimal monetary values. Listed individually
+# per the existing Neo4j FinancialYear schema.
+
+fontem:filingSource
+    a owl:DatatypeProperty ;
+    rdfs:label    "source"@en ;
+    rdfs:comment  "Where the filing came from: edgar | esef | gleif."@en ;
+    rdfs:domain   fontem:Filing ;
+    rdfs:range    xsd:string .
+
+fontem:filingDate
+    a owl:DatatypeProperty ;
+    rdfs:label    "filing date"@en ;
+    rdfs:domain   fontem:Filing ;
+    rdfs:range    xsd:date .
+
+fontem:revenue            a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "revenue"@en .
+fontem:netIncome          a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "net income"@en .
+fontem:totalAssets        a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "total assets"@en .
+fontem:totalLiabilities   a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "total liabilities"@en .
+fontem:equity             a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "equity"@en .
+fontem:cash               a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "cash"@en .
+fontem:currentAssets      a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "current assets"@en .
+fontem:currentLiabilities a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "current liabilities"@en .
+fontem:operatingIncome    a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "operating income"@en .
+fontem:operatingCashflow  a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "operating cashflow"@en .
+fontem:capex              a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "CAPEX"@en .
+fontem:eps                a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "EPS"@en .
+fontem:sharesOutstanding  a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "shares outstanding"@en .
+fontem:longTermDebt       a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "long-term debt"@en .
+fontem:inventory          a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "inventory"@en .
+fontem:grossProfit        a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "gross profit"@en .
+fontem:incomeTaxExpense   a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "income tax expense"@en .
+fontem:interestExpense    a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "interest expense"@en .
+fontem:freeCashflow       a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "free cashflow"@en .
+fontem:depreciationAmortization a owl:DatatypeProperty ; rdfs:domain fontem:Filing ; rdfs:range xsd:decimal ; rdfs:label "depreciation + amortization"@en .
