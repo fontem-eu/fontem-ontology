@@ -77,31 +77,100 @@ This is genuinely closer to "native reasoner" semantics. It's not
 declarative-from-the-ontology-axiom, but it's fire-on-every-query
 which is what we actually wanted.
 
-## Recommendation
+## Recommendation: Virtuoso
 
-**Fuseki is the right substrate for Phase 1.** Reasons:
+The first cut of this doc recommended Fuseki on the strength of the
+drift property. After reviewing the **realistic full-build-out
+workload**, that recommendation flips.
 
-1. **No drift risk.** The `client_chain` rule fires on every query.
-   No cron, no post-load step, no stale-summary class of bug.
-2. **The ontology declares the chain** (`owl:propertyChainAxiom` in
-   `procurement.ttl`); even though Jena's bundled reasoner doesn't
-   pick it up, our rules file mechanically restates the same axiom
-   right next to it. The intent stays declarative; the
-   implementation is two extra lines per chain in `rules.txt`.
-3. **Apache 2.0** — no GPL contagion concerns.
-4. **Operationally simpler** — one JVM, one binary, less to tune.
-5. **Smaller cold start + memory footprint** — matters on a 32 GB
-   shared node.
+### The scale calculation that flips it
 
-Reasons we'd reconsider:
-- **Scale**: ~1B triples comfortable on Fuseki; ~10B on Virtuoso.
-  At Fontem's projected 2-5B triples we're in the borderline zone.
-  If we cross 1B and start seeing query latency degrade, we'd want
-  to revisit. But that's a problem for Phase 4 / 5, not Phase 0.
-- **Fulltext search**: Virtuoso's `bif:contains` is built in and
-  works on every literal; Fuseki's text-search story is separate
-  setup per dataset (Lucene assembler). For our entity-resolution
-  needs (`Company.name` matching) this is real work, but bounded.
+| Component | Triples (loaded) |
+|---|---:|
+| Fontem own data (procurement, GLEIF, lobbying, sanctions, listings, NUTS) | 2–5 B |
+| Wikidata truthy mirror (`<http://wikidata.org/entity>` named graph) | ~12 B |
+| EU Knowledge Graph mirror (`<http://linkedopendata.eu/entity>` named graph) | 0.1–1 B |
+| OWL2-RL materialised closure (subClassOf, sameAs, transitive owns, …) | +30–80% |
+| **Total ceiling** | **18–25 B** |
+
+That's not Fuseki territory. Fuseki on a single JVM is comfortable
+to ~1 B; query latency turns multi-second around 5 B; loading the
+full Wikidata dump runs 48+ hours and the JVM heap profile is
+uncomfortable. We'd hit the wall mid-Phase 3.
+
+Virtuoso is the only FOSS engine in this comparison set actually
+proven at that scale: DBpedia has run ~3 B on it for 15 years; the
+qEndpoint that powers WDQS-scholarly is a sibling C++ store at
+similar volumes.
+
+### Why drift turned out not to be the dominant factor
+
+The drift property is real but solvable as a write-pattern problem,
+not an architecture problem. The fix is the same shape as
+`_refresh_trade_edges` we shipped in `gmr-consolidator` a couple of
+weeks ago: every writer calls a small post-write maintenance SPARQL
+that updates the derived triples for the affected neighbourhood.
+Localised, transactional, well-understood, ~5 lines per writer.
+Plus a defence-in-depth nightly re-materialise — same belt-and-
+braces shape as the existing `materialize_trade_edges` cron we just
+landed.
+
+By contrast, Fuseki's scale ceiling is **not** solvable as a
+write-pattern problem. It's solvable only by switching engines.
+
+### What we get from picking Virtuoso
+
+- **`owl:sameAs` semantics** — full transitive closure, triple
+  replication on both sides, query rewriting. This is the actual
+  prize of the migration; Neo4j's `:SAME_AS` edge sits there with
+  no semantic teeth.
+- **Wikidata + EUKG mirrors as named graphs** — sub-100ms
+  cross-graph joins instead of 1–5s remote `SERVICE` calls.
+- **`bif:contains` fulltext** built in; works on every literal
+  without a separate Lucene assembler.
+- **GeoSPARQL** out of the box (matters when Atlas/NUTS data
+  eventually wants spatial queries).
+- **15-year production track record** at our projected scale.
+
+### What we accept as the cost
+
+- **No native `owl:propertyChainAxiom`.** Same finding as Fuseki's
+  bundled reasoner. Workaround = write-time hooks on derived
+  predicates (`fontem:client`, `fontem:supplier`, eventually
+  `fontem:ultimateParent` if we add it). The hooks are SPARQL
+  versions of the same `_refresh_trade_edges` pattern; this
+  problem is well-understood in our codebase.
+- **GPL-2 license** (OS edition). For an internal/public-interest
+  tool that doesn't redistribute modified Virtuoso, contagion
+  concern is essentially zero.
+- **Heavier ops shape**: `virtuoso.ini` tuning, page-buffer
+  config. Phase 1 absorbs this once.
+
+### Engines we considered and rejected
+
+- **GraphDB Free** — has native `owl:propertyChainAxiom`. But the
+  free tier caps at 2 concurrent queries; non-starter for a
+  public SPARQL endpoint. Paid clustering is serious money.
+- **Stardog Free** — cleanest OWL semantics, commercial license
+  tier becomes a real concern at scale.
+- **QLever** — purpose-built for our exact scale, ms latency on
+  10B+. But it's read-mostly; rebuild on writes is slow. Wrong
+  fit for a writeable data graph; could become a future hybrid
+  (QLever for the Wikidata mirror, Virtuoso for the write side).
+- **RDFox** — Oxford spin-out, real OWL2-RL native. Commercial
+  only. Skip.
+
+### What this comparison was worth
+
+The Fuseki experiment wasn't wasted. We now have:
+
+1. An empirical comparison instead of a vibe.
+2. A working dual-engine harness (`tools/smoke/{virtuoso,fuseki}/`)
+   if we ever want to swap or run in parallel.
+3. A written record (this doc) for the "why did you pick
+   Virtuoso" question two years from now.
+
+Phase 1 ships on Virtuoso.
 
 ## What stays the same regardless of engine
 

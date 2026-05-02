@@ -401,28 +401,197 @@ Until that smoke fires, Phase 1 doesn't start.
 
 ---
 
-# Phase 1 — Infrastructure (sketched)
+# Phase 1 — Infrastructure (detailed)
 
-Once the ontology is settled, stand up real Virtuoso in the cluster.
+Stand up real Virtuoso in the cluster. The substrate decision is
+locked (see `tools/smoke/COMPARISON.md`); this phase is mechanical
+infra work. ~1 week of effort.
 
-- Helm chart for Virtuoso OS (StatefulSet, PVC, ConfigMap for
-  `virtuoso.ini`, Secret for `dba` password). No good off-the-shelf
-  one; we write our own.
-- `virtuoso.ini` tuning for the 20 GB allocation:
-  `NumberOfBuffers ≈ 2,500,000` (each = 8 KB → ~19 GB working set,
-  leaving 1 GB headroom inside the cgroup).
-- `MaxClientConnections`, `ServerThreads`, `IndexTreeMaps` per the
-  Virtuoso performance tuning guide for a single 12c+20HT box.
-- Postgres: add `vectors` schema with `embeddings` table
-  `(entity_iri text PRIMARY KEY, embedding vector(768),
-  encoder_id text)`. pgvector index: HNSW.
-- Backup: cron `backup_online()` to S3-compatible (MinIO) or NFS.
-  **Practice the restore path before committing to anything else.**
-- Auth: SPARQL UPDATE behind basic auth (or Vault-issued cred);
-  SPARQL SELECT public. Reverse proxy via the existing Ingress.
-- Monitoring: Prometheus exporter for Virtuoso (community one
-  exists); dashboards for query latency, buffer hit rate,
-  reasoner materialisation time, disk usage.
+## 1.1 Helm chart for Virtuoso OS
+
+No first-party Helm chart exists; we write our own. Layout:
+
+```
+deployment/
+  Chart.yaml
+  values.yaml
+  templates/
+    statefulset.yaml      ← single replica, anti-affinity off (single-node prod)
+    pvc.yaml              ← /database (data) + /backup (online backups)
+    configmap-ini.yaml    ← virtuoso.ini, see §1.2
+    secret-dba.yaml       ← Vault-issued `dba` password
+    service.yaml          ← ClusterIP exposing 8890 (HTTP/SPARQL) + 1111 (ISQL, internal only)
+    ingress.yaml          ← swap fontem-data-placeholder Service for Virtuoso's
+    cronjob-backup.yaml   ← daily `backup_online()` to /backup PVC
+```
+
+The existing `infra/fontem-data-placeholder.yaml` Service stays —
+just retargets at the new Virtuoso pod. Bastion-side nginx config
+unchanged. NodePort 31457 unchanged.
+
+## 1.2 `virtuoso.ini` tuning for the 20 GB budget
+
+```ini
+[Parameters]
+NumberOfBuffers          = 2500000   ; ~19 GB working set (each = 8 KB)
+MaxCheckpointRemap       = 625000    ; 25% of NumberOfBuffers, default ratio
+DefaultIsolation         = 2         ; read committed
+MaxClientConnections     = 50
+ServerThreads            = 20        ; matches 20 hyperthreads
+IndexTreeMaps            = 256
+DirsAllowed              = ., /opt/virtuoso-opensource/share, /opt/virtuoso-opensource/vad, /import, /backup
+MaxQueryCostEstimationTime = 60      ; seconds
+MaxQueryExecutionTime      = 300     ; seconds — generous for federation
+
+[HTTPServer]
+ServerPort                 = 8890
+HTTPThreadSize             = 280000
+ServerThreads              = 20
+KeepAliveTimeout           = 10
+
+[SPARQL]
+DefaultGraph               = http://data.fontem.eu/graph/data
+ResultSetMaxRows           = 50000
+MaxQueryCostEstimationTime = 60
+MaxQueryExecutionTime      = 300
+```
+
+Leaves ~1 GB headroom inside the 20 GB cgroup. If we need to push
+the buffer pool higher later, raise the cgroup limit first; OOM-
+killing the database is a bad day.
+
+## 1.3 Postgres pgvector sidecar
+
+Add to the existing Postgres deployment:
+
+```sql
+CREATE SCHEMA vectors;
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE vectors.embeddings (
+    entity_iri    text PRIMARY KEY,
+    embedding     vector(768) NOT NULL,
+    encoder_id    text NOT NULL,
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX embeddings_hnsw_cosine ON vectors.embeddings
+USING hnsw (embedding vector_cosine_ops);
+```
+
+The `entity_iri` is the foreign key into Virtuoso. Application
+code reads/writes embeddings here, then queries Virtuoso to
+resolve the IRI to RDF triples.
+
+## 1.4 Backup + restore drill
+
+- Cron daily at 04:00 UTC: `EXEC = "backup_online (...)"` via ISQL.
+- Backups land in `/backup` PVC; weekly rotation off-cluster to
+  S3-compatible MinIO (the same one the existing ETL backups use).
+- **Restore drill before declaring Phase 1 done.** Spin a second
+  Virtuoso pod from the backup, run a known query, validate the
+  result matches a snapshot. Documented runbook in
+  `infra/runbooks/virtuoso-restore.md`.
+
+## 1.5 Auth
+
+- SPARQL SELECT (port 8890, path `/sparql`): **public**. We want
+  outside SPARQL clients to federate against us. Restricted only
+  by per-IP rate limiting at the bastion nginx layer.
+- SPARQL UPDATE (path `/sparql-auth`): basic auth, Vault-issued
+  password rotated weekly. Only ETL writers + the consolidator
+  hold the credential.
+- ISQL (port 1111): never exposed; ClusterIP only, in-cluster only.
+- Default `dba/dba` rotated to a Vault-issued password on first
+  start. Document this so anyone hitting the runbook does it
+  correctly.
+
+## 1.6 Reverse-tunnel routing (no change from Phase 0)
+
+The existing chain stays:
+```
+public DNS data.fontem.eu → Scaleway bastion 51.159.141.141 → cluster
+NodePort 31457 → Service fontem-data → (was placeholder; now Virtuoso)
+```
+
+The placeholder pod gets retired in Phase 1's last step. Cutover
+is a Service-selector swap; the IRI host stays resolvable
+throughout.
+
+## 1.7 Write-time hook pattern (replaces materialised-view drift)
+
+The big design call inherited from Phase 0: Virtuoso doesn't
+implement `owl:propertyChainAxiom` from the TBox. The fix isn't
+"give up on the chain"; it's "write the chain at write time, not
+load time, and not query time".
+
+Same shape as `gmr-consolidator/src/consolidator/actions.py:
+_refresh_trade_edges` we shipped a couple of weeks ago. Generic
+pattern:
+
+```python
+class WriteHook:
+    """Recomputes derived triples for an entity's neighbourhood
+    after a write. Idempotent: drop-and-rebuild on every call."""
+    def refresh_authority(self, conn, authority_iri: str) -> None:
+        conn.update(REFRESH_AUTHORITY_TRADE_EDGES, iri=authority_iri)
+
+REFRESH_AUTHORITY_TRADE_EDGES = """
+WITH <http://data.fontem.eu/graph/data>
+DELETE { ?auth fontem:client ?co . ?co fontem:supplier ?auth . }
+WHERE  { ?auth fontem:client ?co . FILTER (?auth = ?canonical) }
+;
+WITH <http://data.fontem.eu/graph/data>
+INSERT { ?canonical fontem:client ?co . ?co fontem:supplier ?canonical . }
+WHERE  {
+  ?canonical fontem:awarded ?ct .
+  ?ct fontem:awardedTo ?co .
+  FILTER (?canonical = ?iri)
+}
+"""
+```
+
+Each ETL writer + the consolidator's merge action calls the
+appropriate hook for the entity it just touched. **Localised** —
+only the affected node's trade pairs get recomputed, not the
+global graph. **Idempotent** — DELETE-before-INSERT, safe to re-run.
+
+Defence-in-depth nightly cron: full re-materialise of every
+derived predicate. Same shape as the existing
+`materialize_trade_edges` cron; we keep that pattern, retarget it
+at SPARQL.
+
+## 1.8 Monitoring
+
+- Prometheus exporter for Virtuoso (community one exists). Scrape
+  `/sparql-stats`.
+- Dashboards (Grafana):
+  - Query latency p50/p95/p99
+  - Buffer-pool hit rate (target > 95%)
+  - Reasoner materialisation time per ETL run
+  - Disk usage on `/database` and `/backup` PVCs
+  - SPARQL endpoint error rate (4xx/5xx)
+- Kuma push from the daily backup cron (matches the existing
+  `etl-trade-edges` cronjob's pattern).
+
+## 1.9 Phase 1 → Phase 2 hand-off
+
+Phase 1 closes when:
+
+- [ ] Virtuoso pod up, healthy, reachable at `https://data.fontem.eu/sparql`.
+- [ ] `dba` password rotated to a Vault-issued value.
+- [ ] Phase 0 ontology TBox loaded into `<…/graph/ontology>`.
+- [ ] Smoke fixture loaded into `<…/graph/data>`; the four
+  Phase 0 verification queries return the expected results
+  against the **production** Virtuoso (not just the smoke
+  Docker container).
+- [ ] Backup cron has produced at least one backup; restore
+  drill from that backup verified end-to-end.
+- [ ] pgvector schema in place; `embeddings` table writable.
+- [ ] Monitoring dashboards show non-zero data.
+
+When all of those are checked, Phase 2 (sanctions ETL pilot)
+starts.
 
 # Phase 2 — Pilot ETL: sanctions (sketched)
 
