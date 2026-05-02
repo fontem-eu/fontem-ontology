@@ -401,11 +401,20 @@ Until that smoke fires, Phase 1 doesn't start.
 
 ---
 
-# Phase 1 — Infrastructure (detailed)
+# Phase 1 — Infrastructure (detailed, staging-sized)
 
-Stand up real Virtuoso in the cluster. The substrate decision is
-locked (see `tools/smoke/COMPARISON.md`); this phase is mechanical
-infra work. ~1 week of effort.
+Stand up real Virtuoso in the cluster. Substrate decision is locked
+(see `tools/smoke/COMPARISON.md`); this phase is mechanical infra
+work. ~1 week of effort.
+
+> **Staging vs prod scale.** This plan sizes Virtuoso for the
+> current staging deployment — single-node cluster, single Virtuoso
+> for all four logical environments (gmr, gmr-staging, gmr-dev,
+> gmr-dast), staging ETL data (a few months of TED, GLEIF, lobbying
+> snapshots — not the full historical load). Memory + storage
+> match the existing Neo4j footprint (2Gi req / 5Gi limit, 50Gi
+> data PV). When the new prod node arrives we re-tune up — the
+> ConfigMap is the only thing that changes.
 
 ## 1.1 Helm chart for Virtuoso OS
 
@@ -416,37 +425,39 @@ deployment/
   Chart.yaml
   values.yaml
   templates/
-    statefulset.yaml      ← single replica, anti-affinity off (single-node prod)
-    pvc.yaml              ← /database (data) + /backup (online backups)
+    statefulset.yaml      ← single replica, gmr namespace
+    pvc-data.yaml         ← claims virtuoso-data-pv (50Gi RWO, NFS)
+    pvc-backup.yaml       ← claims virtuoso-backup-pv (20Gi RWX, NFS)
     configmap-ini.yaml    ← virtuoso.ini, see §1.2
     secret-dba.yaml       ← Vault-issued `dba` password
-    service.yaml          ← ClusterIP exposing 8890 (HTTP/SPARQL) + 1111 (ISQL, internal only)
-    ingress.yaml          ← swap fontem-data-placeholder Service for Virtuoso's
+    certificate.yaml      ← cert-manager Certificate via vault-issuer
+    service.yaml          ← ClusterIP 8890 (HTTP/SPARQL) + 1111 (ISQL, internal)
     cronjob-backup.yaml   ← daily `backup_online()` to /backup PVC
 ```
 
 The existing `infra/fontem-data-placeholder.yaml` Service stays —
-just retargets at the new Virtuoso pod. Bastion-side nginx config
-unchanged. NodePort 31457 unchanged.
+its selector swaps from the placeholder pod to the Virtuoso pod
+on cutover. Bastion-side nginx config unchanged. NodePort 31457
+unchanged.
 
-## 1.2 `virtuoso.ini` tuning for the 20 GB budget
+## 1.2 `virtuoso.ini` tuning for staging (2 GiB cgroup)
 
 ```ini
 [Parameters]
-NumberOfBuffers          = 2500000   ; ~19 GB working set (each = 8 KB)
-MaxCheckpointRemap       = 625000    ; 25% of NumberOfBuffers, default ratio
+NumberOfBuffers          = 180000    ; ~1.4 GiB working set (each = 8 KiB)
+MaxCheckpointRemap       = 45000     ; 25% of NumberOfBuffers
 DefaultIsolation         = 2         ; read committed
-MaxClientConnections     = 50
-ServerThreads            = 20        ; matches 20 hyperthreads
+MaxClientConnections     = 20
+ServerThreads            = 4
 IndexTreeMaps            = 256
 DirsAllowed              = ., /opt/virtuoso-opensource/share, /opt/virtuoso-opensource/vad, /import, /backup
-MaxQueryCostEstimationTime = 60      ; seconds
-MaxQueryExecutionTime      = 300     ; seconds — generous for federation
+MaxQueryCostEstimationTime = 60
+MaxQueryExecutionTime      = 300
 
 [HTTPServer]
 ServerPort                 = 8890
 HTTPThreadSize             = 280000
-ServerThreads              = 20
+ServerThreads              = 4
 KeepAliveTimeout           = 10
 
 [SPARQL]
@@ -456,9 +467,17 @@ MaxQueryCostEstimationTime = 60
 MaxQueryExecutionTime      = 300
 ```
 
-Leaves ~1 GB headroom inside the 20 GB cgroup. If we need to push
-the buffer pool higher later, raise the cgroup limit first; OOM-
-killing the database is a bad day.
+Pod resources: `requests: { cpu: 500m, memory: 1Gi }`,
+`limits: { cpu: 2, memory: 2Gi }`. The cluster is tight, so we
+hold a hard 2 GiB ceiling for now. Headroom inside the cgroup is
+~600 MiB above the buffer pool — enough for the (JVM-less)
+Virtuoso process + page cache, not much else. If we observe
+OOM-kills or query latency from buffer thrashing, raise the
+cgroup first; OOM-killing the database is a bad day.
+
+When the prod node arrives we update the ConfigMap to push
+NumberOfBuffers up (e.g. 2,500,000 ≈ 19 GiB) and bump the cgroup
+limit. No other change.
 
 ## 1.3 Postgres pgvector sidecar
 
@@ -483,30 +502,110 @@ The `entity_iri` is the foreign key into Virtuoso. Application
 code reads/writes embeddings here, then queries Virtuoso to
 resolve the IRI to RDF triples.
 
-## 1.4 Backup + restore drill
+## 1.4 Storage — NFS PVs (matching existing Neo4j pattern)
 
-- Cron daily at 04:00 UTC: `EXEC = "backup_online (...)"` via ISQL.
-- Backups land in `/backup` PVC; weekly rotation off-cluster to
-  S3-compatible MinIO (the same one the existing ETL backups use).
-- **Restore drill before declaring Phase 1 done.** Spin a second
-  Virtuoso pod from the backup, run a known query, validate the
-  result matches a snapshot. Documented runbook in
-  `infra/runbooks/virtuoso-restore.md`.
+Two statically provisioned NFS PVs, identical layout to the
+existing `neo4j-{data,backup}-pv`:
 
-## 1.5 Auth
+```yaml
+# pv/virtuoso-data-pv.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: virtuoso-data-pv
+spec:
+  accessModes: [ReadWriteOnce]
+  capacity: { storage: 50Gi }
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 10.44.0.6
+    path: /srv/nfs/virtuoso-data
+---
+# pv/virtuoso-backup-pv.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: virtuoso-backup-pv
+spec:
+  accessModes: [ReadWriteMany]
+  capacity: { storage: 20Gi }
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 10.44.0.6
+    path: /srv/nfs/virtuoso-backup
+```
 
-- SPARQL SELECT (port 8890, path `/sparql`): **public**. We want
-  outside SPARQL clients to federate against us. Restricted only
-  by per-IP rate limiting at the bastion nginx layer.
+Action: create the two NFS export directories on the NFS server
+side before applying the PVs. Same step we did for Neo4j's PVs.
+
+## 1.5 Backup + restore drill
+
+- Daily 04:00 UTC CronJob: `EXEC = "backup_online (...)"` via
+  ISQL. Backup files land in `/backup` (the NFS-backed RWX PV).
+- Retention: keep 7 daily backups, prune older. Cron handles this
+  in-script.
+- No off-cluster mirror at this stage — staging data is
+  reproducible from upstream sources, and the NFS PV is on a
+  different host from the cluster node so single-host failure
+  doesn't lose both. Off-cluster S3/MinIO mirroring can land in
+  Phase 7 alongside the prod hardware bring-up.
+- **Restore drill before declaring Phase 1 done.** Spin a
+  throwaway second Virtuoso pod from the backup, run a known
+  query, validate the result matches a pre-recorded snapshot.
+  Documented runbook in `infra/runbooks/virtuoso-restore.md`.
+
+## 1.6 TLS via cert-manager + Vault PKI
+
+The `vault-issuer` ClusterIssuer is already running in the cluster
+(verified). cert-manager mints a cert for Virtuoso's
+cluster-internal hostname:
+
+```yaml
+# certificate.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: virtuoso-tls
+  namespace: gmr
+spec:
+  secretName: virtuoso-tls
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - virtuoso.gmr.svc.cluster.local
+    - virtuoso
+  duration: 720h     # 30 days
+  renewBefore: 168h  # 7 days
+```
+
+Virtuoso terminates HTTPS on port 8443 using the Secret-mounted
+cert; HTTP stays on 8890 for the bastion forward. In-cluster
+clients (ETL writers, consolidator, gmr-api) talk to
+`https://virtuoso.gmr.svc.cluster.local:8443/sparql`. The existing
+linkerd mesh provides additional mTLS at the pod-to-pod layer for
+free; cert-manager handles the certificate Virtuoso itself
+presents.
+
+Public traffic flow remains: `data.fontem.eu` → bastion (TLS
+terminated by user-managed nginx) → cluster NodePort 31457 → port
+8890 (HTTP, internal). No public exposure of port 8443.
+
+## 1.7 Auth
+
+- SPARQL SELECT (path `/sparql`): **public**. We want federators
+  reaching us. Per-IP rate limit applied at the bastion.
 - SPARQL UPDATE (path `/sparql-auth`): basic auth, Vault-issued
-  password rotated weekly. Only ETL writers + the consolidator
-  hold the credential.
+  password. Only ETL writers + the consolidator hold the credential.
+  Vault `database/static-roles/virtuoso-dba` rotates weekly; the
+  password lives in a Vault Static Secret synced to the
+  `virtuoso-dba` Secret in the gmr namespace via VSO (same pattern
+  the rest of the platform uses).
 - ISQL (port 1111): never exposed; ClusterIP only, in-cluster only.
-- Default `dba/dba` rotated to a Vault-issued password on first
-  start. Document this so anyone hitting the runbook does it
-  correctly.
+- Default `dba/dba` rotated to the Vault-issued value on first
+  start. Document this in the runbook.
 
-## 1.6 Reverse-tunnel routing (no change from Phase 0)
+## 1.8 Reverse-tunnel routing (no change from Phase 0)
 
 The existing chain stays:
 ```
@@ -518,7 +617,7 @@ The placeholder pod gets retired in Phase 1's last step. Cutover
 is a Service-selector swap; the IRI host stays resolvable
 throughout.
 
-## 1.7 Write-time hook pattern (replaces materialised-view drift)
+## 1.9 Write-time hook pattern (replaces materialised-view drift)
 
 The big design call inherited from Phase 0: Virtuoso doesn't
 implement `owl:propertyChainAxiom` from the TBox. The fix isn't
@@ -561,7 +660,7 @@ derived predicate. Same shape as the existing
 `materialize_trade_edges` cron; we keep that pattern, retarget it
 at SPARQL.
 
-## 1.8 Monitoring
+## 1.10 Monitoring
 
 - Prometheus exporter for Virtuoso (community one exists). Scrape
   `/sparql-stats`.
@@ -574,7 +673,7 @@ at SPARQL.
 - Kuma push from the daily backup cron (matches the existing
   `etl-trade-edges` cronjob's pattern).
 
-## 1.9 Phase 1 → Phase 2 hand-off
+## 1.11 Phase 1 → Phase 2 hand-off
 
 Phase 1 closes when:
 
