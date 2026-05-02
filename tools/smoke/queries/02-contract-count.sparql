@@ -1,0 +1,15 @@
+# Q2 — the count is a query-time aggregate, not a stored property.
+# Expected for auth-1: co-1=2, co-2=1.
+# For auth-2: co-2=1, co-3=1.
+# This is the query that replaces the old
+# CLIENT_OF.contracts edge attribute (4 vs 0 in the eu-LISA bug).
+
+PREFIX fontem: <http://data.fontem.eu/ontology#>
+
+SELECT ?auth ?co (COUNT(?ct) AS ?contracts) WHERE {
+  ?auth a fontem:Authority ;
+        fontem:awarded ?ct .
+  ?ct fontem:awardedTo ?co .
+}
+GROUP BY ?auth ?co
+ORDER BY ?auth ?co

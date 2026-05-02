@@ -1,20 +1,141 @@
-# Lobbying ontology.
+# Lobbying ontology — EU Transparency Register.
 #
-# Status: stub. Populated during Phase 0.
-#
-# Scope: Lobbyist, lobby meetings, EU Transparency Register
-# vocabulary.
+# Source: load_eu_lobbying.py (16,986 Lobbyists; 40 LobbyInterests).
+# Models the entity (the registered lobbyist organisation), not the
+# activity. Lobby meetings come later.
 
-@prefix fontem:   <http://data.fontem.eu/ontology#> .
-@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix owl:      <http://www.w3.org/2002/07/owl#> .
-@prefix wd:       <http://www.wikidata.org/entity/> .
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix rdf:       <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:       <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:      <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcterms:   <http://purl.org/dc/terms/> .
+@prefix wd:        <http://www.wikidata.org/entity/> .
+@prefix wdt:       <http://www.wikidata.org/prop/direct/> .
 
 <http://data.fontem.eu/ontology/lobbying>
     a owl:Ontology ;
-    rdfs:label "Fontem lobbying ontology"@en ;
-    owl:imports <http://data.fontem.eu/ontology> ;
-    owl:versionInfo "0.0.1-draft" .
+    rdfs:label    "Fontem lobbying ontology"@en ;
+    owl:imports   <http://data.fontem.eu/ontology> ;
+    owl:versionInfo "0.1.0" .
 
-# TBox to be filled in during Phase 0.
+# ─── Classes ──────────────────────────────────────────────────────
+
+fontem:Lobbyist
+    a owl:Class ;
+    rdfs:label    "Lobbyist"@en ;
+    rdfs:comment  "An organisation registered with the EU Transparency Register. Identified by a `tr_id` and emitted with `wdt:P2657` for federation."@en ;
+    rdfs:subClassOf fontem:Organisation , wd:Q431603 .
+
+# LobbyInterest is a small controlled vocabulary (40 terms);
+# modelled as a SKOS concept scheme rather than an OWL class.
+fontem:LobbyInterestScheme
+    a skos:ConceptScheme ;
+    rdfs:label    "EU Transparency Register lobby interests"@en ;
+    skos:notation "TR-INTERESTS" .
+
+fontem:LobbyInterest
+    a owl:Class ;
+    rdfs:label    "Lobby interest"@en ;
+    rdfs:comment  "A subject area of lobbying (e.g. 'Climate', 'Banking') as listed in the EU Transparency Register."@en ;
+    rdfs:subClassOf skos:Concept .
+
+# ─── Object properties ────────────────────────────────────────────
+
+fontem:lobbiesFor
+    a owl:ObjectProperty ;
+    rdfs:label    "lobbies for"@en ;
+    rdfs:comment  "A Lobbyist represents a Company (or another Organisation) before EU institutions."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    fontem:Organisation .
+
+fontem:interestedIn
+    a owl:ObjectProperty ;
+    rdfs:label    "interested in"@en ;
+    rdfs:comment  "A Lobbyist's declared subject of interest."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    fontem:LobbyInterest ;
+    rdfs:subPropertyOf dcterms:subject .
+
+# ─── Datatype properties ──────────────────────────────────────────
+#
+# Uses Wikidata directly:
+#   wdt:P2657 — EU Transparency Register ID (the canonical identifier)
+#   wdt:P17   — country
+#   wdt:P571  — registration date (treat as inception)
+
+fontem:acronym
+    a owl:DatatypeProperty ;
+    rdfs:label    "acronym"@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:string ;
+    rdfs:subPropertyOf skos:altLabel .
+
+fontem:trCategory
+    a owl:DatatypeProperty ;
+    rdfs:label    "TR category"@en ;
+    rdfs:comment  "EU Transparency Register category — 'Companies & groups', 'NGOs', etc."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:string .
+
+fontem:entityForm
+    a owl:DatatypeProperty ;
+    rdfs:label    "entity form"@en ;
+    rdfs:comment  "Legal form as declared in the EU Transparency Register."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:string .
+
+fontem:city
+    a owl:DatatypeProperty ;
+    rdfs:label    "city"@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:string .
+
+fontem:website
+    a owl:DatatypeProperty ;
+    rdfs:label    "website"@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:anyURI .
+
+fontem:goals
+    a owl:DatatypeProperty ;
+    rdfs:label    "goals"@en ;
+    rdfs:comment  "Free-text declaration of the organisation's objectives."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:string .
+
+fontem:membersFte
+    a owl:DatatypeProperty ;
+    rdfs:label    "members (FTE)"@en ;
+    rdfs:comment  "Full-time-equivalent staff engaged in lobbying activities."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:decimal .
+
+fontem:lobbyCostMin
+    a owl:DatatypeProperty ;
+    rdfs:label    "lobby cost min (EUR)"@en ;
+    rdfs:comment  "Lower bound of declared annual lobbying spend (the EU TR records ranges, not exact figures)."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:integer .
+
+fontem:lobbyCostMax
+    a owl:DatatypeProperty ;
+    rdfs:label    "lobby cost max (EUR)"@en ;
+    rdfs:comment  "Upper bound of declared annual lobbying spend."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:integer .
+
+fontem:epPasses
+    a owl:DatatypeProperty ;
+    rdfs:label    "European Parliament passes"@en ;
+    rdfs:comment  "Number of European Parliament access passes held by the organisation."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:integer .
+
+fontem:lastUpdated
+    a owl:DatatypeProperty ;
+    rdfs:label    "last updated"@en ;
+    rdfs:comment  "When the lobbyist last updated their TR entry."@en ;
+    rdfs:domain   fontem:Lobbyist ;
+    rdfs:range    xsd:dateTime .

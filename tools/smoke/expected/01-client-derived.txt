@@ -1,0 +1,4 @@
+http://data.fontem.eu/id/Authority/auth-1	http://data.fontem.eu/id/Company/co-1
+http://data.fontem.eu/id/Authority/auth-1	http://data.fontem.eu/id/Company/co-2
+http://data.fontem.eu/id/Authority/auth-2	http://data.fontem.eu/id/Company/co-2
+http://data.fontem.eu/id/Authority/auth-2	http://data.fontem.eu/id/Company/co-3

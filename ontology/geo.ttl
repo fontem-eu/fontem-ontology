@@ -1,0 +1,72 @@
+# Geographic ontology — NUTS regions.
+#
+# Source: load_nuts.py + sync_nuts_from_stats.py (1,808 NUTSRegion
+# nodes, levels 0/1/2/3, parent/child via :PART_OF).
+#
+# Modelled as a SKOS concept scheme: the NUTS taxonomy IS a
+# hierarchical classification (skos:broader = :PART_OF), each region
+# has a notation (the NUTS code), and labels are multilingual.
+
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix rdf:       <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:       <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:      <http://www.w3.org/2004/02/skos/core#> .
+@prefix wd:        <http://www.wikidata.org/entity/> .
+@prefix wdt:       <http://www.wikidata.org/prop/direct/> .
+
+<http://data.fontem.eu/ontology/geo>
+    a owl:Ontology ;
+    rdfs:label    "Fontem geographic ontology"@en ;
+    owl:imports   <http://data.fontem.eu/ontology> ;
+    owl:versionInfo "0.1.0" .
+
+# ─── Concept scheme + classes ────────────────────────────────────
+
+fontem:NUTSScheme
+    a skos:ConceptScheme ;
+    rdfs:label    "Nomenclature of Territorial Units for Statistics"@en ;
+    skos:notation "NUTS" ;
+    rdfs:seeAlso  wd:Q193083 .
+
+fontem:NUTSRegion
+    a owl:Class ;
+    rdfs:label    "NUTS region"@en ;
+    rdfs:comment  "A region in the EU's NUTS taxonomy. Carries a code (e.g. PT170), a level (0–3), a country, and a parent region (via fontem:partOf / skos:broader)."@en ;
+    rdfs:subClassOf fontem:GeographicEntity , skos:Concept .
+
+# ─── Object properties ────────────────────────────────────────────
+
+fontem:partOf
+    a owl:ObjectProperty , owl:TransitiveProperty ;
+    rdfs:label    "part of"@en ;
+    rdfs:comment  "NUTS hierarchy parent. Transitive — the reasoner derives multi-level containment."@en ;
+    rdfs:domain   fontem:NUTSRegion ;
+    rdfs:range    fontem:NUTSRegion ;
+    rdfs:subPropertyOf skos:broader .
+
+# ─── Datatype properties ──────────────────────────────────────────
+
+fontem:nutsCode
+    a owl:DatatypeProperty , owl:FunctionalProperty ;
+    rdfs:label    "NUTS code"@en ;
+    rdfs:comment  "Eurostat NUTS code (e.g. 'PT', 'PT17', 'PT170'). Equivalent to wdt:P605."@en ;
+    rdfs:domain   fontem:NUTSRegion ;
+    rdfs:range    xsd:string ;
+    owl:equivalentProperty wdt:P605 ;
+    rdfs:subPropertyOf skos:notation .
+
+fontem:nutsLevel
+    a owl:DatatypeProperty , owl:FunctionalProperty ;
+    rdfs:label    "NUTS level"@en ;
+    rdfs:comment  "0 = country, 1 = major region, 2 = basic region, 3 = small region."@en ;
+    rdfs:domain   fontem:NUTSRegion ;
+    rdfs:range    xsd:integer .
+
+fontem:countryAlpha3
+    a owl:DatatypeProperty ;
+    rdfs:label    "country (ISO 3166-1 alpha-3)"@en ;
+    rdfs:comment  "ISO-3166-1 alpha-3 country code; redundantly carried for fast filters."@en ;
+    rdfs:domain   fontem:NUTSRegion ;
+    rdfs:range    xsd:string .

@@ -1,0 +1,13 @@
+# Q1 — fontem:client must be derived from the property chain.
+# Expected: 4 rows (auth-1→co-1, auth-1→co-2, auth-2→co-2, auth-2→co-3).
+# This query is the eu-LISA bug-class smoke: if it returns
+# anything but 4, the reasoner isn't materialising the chain
+# correctly and the entire migration design is in question.
+
+PREFIX fontem: <http://data.fontem.eu/ontology#>
+
+SELECT DISTINCT ?auth ?co WHERE {
+  ?auth a fontem:Authority ;
+        fontem:client ?co .
+}
+ORDER BY ?auth ?co

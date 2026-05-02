@@ -1,0 +1,6 @@
+http://data.fontem.eu/ontology#Agent
+http://data.fontem.eu/ontology#Authority
+http://data.fontem.eu/ontology#Organisation
+http://www.wikidata.org/entity/Q24229398
+http://www.wikidata.org/entity/Q294272
+http://www.wikidata.org/entity/Q43229

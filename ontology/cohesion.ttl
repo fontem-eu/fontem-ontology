@@ -1,0 +1,64 @@
+# Cohesion ontology — EU Cohesion Funds beneficiary projects.
+#
+# Source: load_eu_knowledge_graph.py (10,911 CohesionProject nodes).
+#
+# IMPORTANT: we deliberately do NOT mint a fontem:CohesionProject
+# class. Cohesion projects already live in the EU Knowledge Graph
+# (Kohesio) at linkedopendata.eu, which is a Wikibase instance run
+# by DG REGIO. Each Fontem cohesion-project entity gets an
+# `owl:sameAs` to its EUKG counterpart via the `wikibase_qid` field
+# we already carry. Federation against query.linkedopendata.eu/sparql
+# (or, post-Phase-3, a local mirror in the Virtuoso named graph
+# <http://linkedopendata.eu/entity>) handles enrichment.
+#
+# This file therefore mostly defines the BENEFICIARY_OF relation
+# (Company → external EUKG entity) and a few datatype properties
+# we want to keep locally.
+
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix rdf:       <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:       <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix wd:        <http://www.wikidata.org/entity/> .
+@prefix wdt:       <http://www.wikidata.org/prop/direct/> .
+
+<http://data.fontem.eu/ontology/cohesion>
+    a owl:Ontology ;
+    rdfs:label    "Fontem cohesion ontology"@en ;
+    owl:imports   <http://data.fontem.eu/ontology> ;
+    owl:versionInfo "0.1.0" .
+
+# ─── Object properties ────────────────────────────────────────────
+
+fontem:beneficiaryOf
+    a owl:ObjectProperty ;
+    rdfs:label    "beneficiary of"@en ;
+    rdfs:comment  "A Company is the beneficiary of an EU Cohesion Funds project. Range is intentionally open — production data uses EUKG IRIs (http://linkedopendata.eu/entity/Q…) reached via `owl:sameAs`."@en ;
+    rdfs:domain   fontem:Company .
+
+# ─── Datatype properties (locally cached EUKG fields) ────────────
+
+fontem:cohesionProgramme
+    a owl:DatatypeProperty ;
+    rdfs:label    "programme"@en ;
+    rdfs:comment  "Operational programme name. Cached locally to avoid federation on every list-view render; the EUKG mirror (Phase 3) is the source of truth."@en ;
+    rdfs:range    xsd:string .
+
+fontem:cohesionFund
+    a owl:DatatypeProperty ;
+    rdfs:label    "fund"@en ;
+    rdfs:comment  "EU fund identifier (ERDF, CF, ESF, ERDF-INTERREG)."@en ;
+    rdfs:range    xsd:string .
+
+fontem:totalBudget
+    a owl:DatatypeProperty ;
+    rdfs:label    "total budget"@en ;
+    rdfs:comment  "Total project budget in EUR."@en ;
+    rdfs:range    xsd:decimal .
+
+fontem:euContribution
+    a owl:DatatypeProperty ;
+    rdfs:label    "EU contribution"@en ;
+    rdfs:comment  "EU portion of the total budget in EUR."@en ;
+    rdfs:range    xsd:decimal .

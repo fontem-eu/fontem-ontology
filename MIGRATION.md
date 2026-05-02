@@ -557,6 +557,47 @@ in parallel. Phase 6 is the cutover:
 - Remove the `kubectl get pods -n gmr -l app=neo4j` from runbooks.
 - Update `MIGRATION.md` history section: "Phase 7 completed YYYY-MM-DD".
 
+# Phase 0 finding — Virtuoso doesn't do property chains
+
+**Surfaced during WS6**, kept here for visibility.
+
+The migration plan rests on the reasoner materialising
+`fontem:client owl:propertyChainAxiom (fontem:awarded
+fontem:awardedTo)` automatically. Virtuoso 7's inference engine
+covers RDFS + a useful OWL2 subset (subClassOf, subPropertyOf,
+inverseOf, TransitiveProperty, sameAs, equivalentClass /
+equivalentProperty) but **NOT property-chain axioms**. The chain
+declaration in `procurement.ttl` is therefore a no-op on Virtuoso.
+
+The smoke test ships with a workaround: a SPARQL `INSERT … WHERE`
+post-load step (`tools/smoke/post-load.sparql`) materialises the
+chain explicitly. This produces correct triples but has the same
+shape as `materialize_trade_edges` did in the Neo4j era — just in
+SPARQL instead of Cypher. **Same materialised-view drift risk
+the migration was supposed to retire.**
+
+Three options to discuss before Phase 4 starts (when the chain
+is ETL-side rather than smoke-side):
+
+1. **Stay on Virtuoso, run a post-load INSERT** as a scheduled
+   step. Simpler ops; centralised in one SPARQL file. The drift
+   risk is bounded by however often the cron runs.
+2. **Stay on Virtuoso, do query-time CONSTRUCT** instead of
+   materialising. Every query that wants `fontem:client` rewrites
+   to traverse `awarded → awardedTo`. No materialisation, no
+   drift, but every read pays the join.
+3. **Switch storage**: GraphDB Free, Stardog Free, or Apache
+   Jena Fuseki all support OWL2-RL property chains natively. The
+   migration cost is bounded — the Turtle ontology, fixtures,
+   and CI smoke are portable; only the Helm chart and the actual
+   storage container change. Strongest correctness story.
+
+The smoke as-is is honest: it proves what Virtuoso *can* do
+(class hierarchy, inverseOf), and confirms the workaround
+materialisation pattern works on the property chain. It just
+doesn't validate the declarative axiom we wrote in the TBox,
+because Virtuoso ignores it.
+
 # Open questions / decisions deferred
 
 These are real and need deciding, but only once earlier phases have

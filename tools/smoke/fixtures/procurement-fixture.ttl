@@ -1,0 +1,60 @@
+# Synthetic procurement fixture — drives the property-chain smoke.
+#
+# Two authorities, three companies, five contracts wired so that:
+#   auth-1 →awarded→ {c-1, c-2, c-3}
+#       c-1 →awardedTo→ co-1
+#       c-2 →awardedTo→ co-1   (auth-1 has TWO contracts with co-1)
+#       c-3 →awardedTo→ co-2
+#   auth-2 →awarded→ {c-4, c-5}
+#       c-4 →awardedTo→ co-2   (co-2 has TWO authorities — auth-1 + auth-2)
+#       c-5 →awardedTo→ co-3
+#
+# Expected reasoner output (fontem:client + fontem:supplier):
+#   auth-1 fontem:client co-1, co-2
+#   auth-2 fontem:client co-2, co-3
+#   co-1 fontem:supplier auth-1
+#   co-2 fontem:supplier auth-1, auth-2
+#   co-3 fontem:supplier auth-2
+#
+# Note: full IRIs (<...>) instead of prefix:local because Turtle's
+# strict parser disallows `/` in PN_LOCAL.
+
+@prefix fontem: <http://data.fontem.eu/ontology#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+
+# ── Authorities
+<http://data.fontem.eu/id/Authority/auth-1>
+    a fontem:Authority ;
+    rdfs:label "Test Authority Alpha"@en .
+<http://data.fontem.eu/id/Authority/auth-2>
+    a fontem:Authority ;
+    rdfs:label "Test Authority Beta"@en .
+
+# ── Companies
+<http://data.fontem.eu/id/Company/co-1> a fontem:Company ; rdfs:label "Test Co. One"@en .
+<http://data.fontem.eu/id/Company/co-2> a fontem:Company ; rdfs:label "Test Co. Two"@en .
+<http://data.fontem.eu/id/Company/co-3> a fontem:Company ; rdfs:label "Test Co. Three"@en .
+
+# ── Contracts
+<http://data.fontem.eu/id/Contract/c-1> a fontem:Contract ; fontem:contractValueEur "1000.00"^^xsd:decimal .
+<http://data.fontem.eu/id/Contract/c-2> a fontem:Contract ; fontem:contractValueEur "2000.00"^^xsd:decimal .
+<http://data.fontem.eu/id/Contract/c-3> a fontem:Contract ; fontem:contractValueEur "3000.00"^^xsd:decimal .
+<http://data.fontem.eu/id/Contract/c-4> a fontem:Contract ; fontem:contractValueEur "4000.00"^^xsd:decimal .
+<http://data.fontem.eu/id/Contract/c-5> a fontem:Contract ; fontem:contractValueEur "5000.00"^^xsd:decimal .
+
+# ── Authority awarded → Contract
+<http://data.fontem.eu/id/Authority/auth-1> fontem:awarded
+    <http://data.fontem.eu/id/Contract/c-1> ,
+    <http://data.fontem.eu/id/Contract/c-2> ,
+    <http://data.fontem.eu/id/Contract/c-3> .
+<http://data.fontem.eu/id/Authority/auth-2> fontem:awarded
+    <http://data.fontem.eu/id/Contract/c-4> ,
+    <http://data.fontem.eu/id/Contract/c-5> .
+
+# ── Contract awardedTo → Company
+<http://data.fontem.eu/id/Contract/c-1> fontem:awardedTo <http://data.fontem.eu/id/Company/co-1> .
+<http://data.fontem.eu/id/Contract/c-2> fontem:awardedTo <http://data.fontem.eu/id/Company/co-1> .
+<http://data.fontem.eu/id/Contract/c-3> fontem:awardedTo <http://data.fontem.eu/id/Company/co-2> .
+<http://data.fontem.eu/id/Contract/c-4> fontem:awardedTo <http://data.fontem.eu/id/Company/co-2> .
+<http://data.fontem.eu/id/Contract/c-5> fontem:awardedTo <http://data.fontem.eu/id/Company/co-3> .

@@ -1,0 +1,33 @@
+# Q5 — Property chain materialisation (workaround).
+#
+# Virtuoso 7 does NOT support owl:propertyChainAxiom natively (its
+# ruleset covers RDFS + a subset of OWL: subClassOf, subPropertyOf,
+# domain/range, inverseOf, transitive, sameAs, equivalent*). Property
+# chains aren't on that list.
+#
+# Our ontology declares the chain declaratively in procurement.ttl,
+# but Virtuoso ignores the axiom. So the smoke runs this SPARQL
+# UPDATE after data load to materialise the chain explicitly. This
+# is conceptually a "post-load reasoner step" — a SPARQL stand-in
+# for what a real OWL2-RL reasoner would do automatically.
+#
+# Same pattern would run in production as a post-load hook. The
+# alternative is query-time CONSTRUCT (no materialisation) or a
+# different store (GraphDB / Stardog / Jena that DO implement
+# property chains). See PHASE-0-PLAN.md "open questions".
+
+PREFIX fontem: <http://data.fontem.eu/ontology#>
+
+INSERT {
+  GRAPH <http://data.fontem.eu/graph/data> {
+    ?auth fontem:client ?co .
+    ?co   fontem:supplier ?auth .
+  }
+}
+WHERE {
+  GRAPH <http://data.fontem.eu/graph/data> {
+    ?auth a fontem:Authority ;
+          fontem:awarded ?ct .
+    ?ct fontem:awardedTo ?co .
+  }
+}

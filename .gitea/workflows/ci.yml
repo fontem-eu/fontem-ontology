@@ -1,0 +1,22 @@
+name: Ontology smoke
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build + run the dockerised smoke. Image is built from the
+      # repo root because the Dockerfile COPYs from ontology/ and
+      # tools/smoke/fixtures/. The runner script handles the
+      # container lifecycle (build, run, wait, load, query, diff,
+      # cleanup) and exits non-zero on any mismatch.
+      - name: Run reasoner smoke
+        run: bash tools/smoke/run.sh
+
+      # Surface the smoke status to the PR via job result; merge to
+      # main is gated on this passing.

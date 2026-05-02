@@ -1,20 +1,82 @@
-# Sanctions ontology.
+# Sanctions ontology — EU consolidated sanctions list.
 #
-# Status: stub. Populated during Phase 0 (pilot domain).
-#
-# Scope: SanctionedEntity, sanctioning body, designation date,
-# alignment with the EU consolidated sanctions list schema.
+# Pilot domain for Phase 2 ETL port. Source: load_eu_sanctions.py.
+# 4,089 SanctionedEntity nodes. The :SANCTIONED predicate (Company →
+# SanctionedEntity) is declared but currently has zero edges — that
+# zero is intentional. Confident automated linkage between a company
+# and a sanctioned entity is defamation-class; the predicate exists
+# for the resolver but the human-review gate is the bottleneck and
+# that's correct.
 
-@prefix fontem:   <http://data.fontem.eu/ontology#> .
-@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix owl:      <http://www.w3.org/2002/07/owl#> .
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix rdf:       <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:       <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:      <http://www.w3.org/2004/02/skos/core#> .
+@prefix wd:        <http://www.wikidata.org/entity/> .
+@prefix wdt:       <http://www.wikidata.org/prop/direct/> .
 
 <http://data.fontem.eu/ontology/sanctions>
     a owl:Ontology ;
-    rdfs:label "Fontem sanctions ontology"@en ;
-    owl:imports <http://data.fontem.eu/ontology> ;
-    owl:versionInfo "0.0.1-draft" .
+    rdfs:label    "Fontem sanctions ontology"@en ;
+    owl:imports   <http://data.fontem.eu/ontology> ;
+    owl:versionInfo "0.1.0" .
 
-# TBox to be filled in during Phase 0. Pilot domain — first source
-# to be ported end-to-end (Phase 2).
+# ─── Classes ──────────────────────────────────────────────────────
+
+fontem:SanctionedEntity
+    a owl:Class ;
+    rdfs:label    "Sanctioned entity"@en ;
+    rdfs:comment  "An organisation listed on the EU consolidated sanctions list. Sanctioned natural persons are out of scope (GDPR — Fontem does not store data about natural persons). Identified by `entity_id` from the EU FSD export."@en ;
+    rdfs:subClassOf wd:Q116276316 .
+
+# ─── Object properties ────────────────────────────────────────────
+
+fontem:sanctionedBy
+    a owl:ObjectProperty ;
+    rdfs:label    "sanctioned by"@en ;
+    rdfs:comment  "A Company is sanctioned by a SanctionedEntity listing. Currently empty — the resolver gate has not produced any confident automated match. Any non-empty population of this predicate IS a journalism story; design accordingly."@en ;
+    rdfs:domain   fontem:Company ;
+    rdfs:range    fontem:SanctionedEntity .
+
+# ─── Datatype properties ──────────────────────────────────────────
+#
+# Wikidata-direct (no Fontem mint):
+#   wdt:P17  — country (nationality)
+#   wdt:P571 — designation date (treat as inception of the listing)
+
+fontem:euReference
+    a owl:DatatypeProperty ;
+    rdfs:label    "EU reference"@en ;
+    rdfs:comment  "EU regulation citation under which the listing was made."@en ;
+    rdfs:domain   fontem:SanctionedEntity ;
+    rdfs:range    xsd:string .
+
+fontem:legalBasis
+    a owl:DatatypeProperty ;
+    rdfs:label    "legal basis"@en ;
+    rdfs:comment  "Legal instrument authorising the sanction."@en ;
+    rdfs:domain   fontem:SanctionedEntity ;
+    rdfs:range    xsd:string .
+
+fontem:listingReason
+    a owl:DatatypeProperty ;
+    rdfs:label    "listing reason"@en ;
+    rdfs:comment  "Free-text justification published with the sanction."@en ;
+    rdfs:domain   fontem:SanctionedEntity ;
+    rdfs:range    xsd:string .
+
+fontem:sanctionRegime
+    a owl:DatatypeProperty ;
+    rdfs:label    "sanction regime"@en ;
+    rdfs:comment  "Sanction programme grouping (e.g. Ukraine territorial integrity, Russia, Iran)."@en ;
+    rdfs:domain   fontem:SanctionedEntity ;
+    rdfs:range    xsd:string .
+
+fontem:designationDate
+    a owl:DatatypeProperty ;
+    rdfs:label    "designation date"@en ;
+    rdfs:comment  "Date the entity was added to the sanctions list."@en ;
+    rdfs:domain   fontem:SanctionedEntity ;
+    rdfs:range    xsd:date .

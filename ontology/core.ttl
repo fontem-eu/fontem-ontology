@@ -1,25 +1,76 @@
 # Core ontology — top-of-hierarchy classes and shared properties.
 #
-# Status: stub. Populated during Phase 0.
-#
-# Scope: Agent, Organisation, Person, Document, GeographicEntity,
-# and the small set of properties common to most entities
-# (hasName → rdfs:label, hasCountry → wdt:P17, hasIdentifier).
-#
-# Other domain TBoxes (procurement.ttl, corporate.ttl, etc.) import
-# this file via owl:imports.
+# Imported by every other domain TBox (procurement.ttl, corporate.ttl,
+# lobbying.ttl, sanctions.ttl, meta.ttl).
 
-@prefix fontem:   <http://data.fontem.eu/ontology#> .
-@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix owl:      <http://www.w3.org/2002/07/owl#> .
-@prefix wd:       <http://www.wikidata.org/entity/> .
-@prefix wdt:      <http://www.wikidata.org/prop/direct/> .
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix rdf:       <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:       <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:      <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcterms:   <http://purl.org/dc/terms/> .
+@prefix wd:        <http://www.wikidata.org/entity/> .
+@prefix wdt:       <http://www.wikidata.org/prop/direct/> .
 
 <http://data.fontem.eu/ontology>
     a owl:Ontology ;
-    rdfs:label "Fontem core ontology"@en ;
-    rdfs:comment "Top of the class hierarchy and shared properties."@en ;
-    owl:versionInfo "0.0.1-draft" .
+    rdfs:label   "Fontem core ontology"@en ;
+    rdfs:comment "Top of the class hierarchy and shared properties.\n\nFontem (https://fontem.eu) is a public-interest transparency platform pulling EU procurement, lobbying, sanctions, ownership and listing data into a single knowledge graph."@en ;
+    dcterms:license   <https://creativecommons.org/licenses/by/4.0/> ;
+    owl:versionInfo   "0.1.0" .
 
-# TBox to be filled in during Phase 0.
+# ─── Top-of-hierarchy classes ─────────────────────────────────────
+
+fontem:Agent
+    a owl:Class ;
+    rdfs:label    "Agent"@en ;
+    rdfs:comment  "An entity capable of acting in the world — organisations and (when later modelled) software agents. Aligns with prov:Agent and Wikidata's Q24229398 (being)."@en ;
+    rdfs:subClassOf wd:Q24229398 .
+
+fontem:Organisation
+    a owl:Class ;
+    rdfs:label    "Organisation"@en ;
+    rdfs:comment  "A social entity established to meet needs or pursue goals — any company, agency, lobbyist or association."@en ;
+    rdfs:subClassOf fontem:Agent , wd:Q43229 .
+
+fontem:Document
+    a owl:Class ;
+    rdfs:label    "Document"@en ;
+    rdfs:comment  "A form for preservation of structured information — parent of Contract, Filing, etc."@en ;
+    rdfs:subClassOf wd:Q49848 .
+
+fontem:GeographicEntity
+    a owl:Class ;
+    rdfs:label    "Geographic entity"@en ;
+    rdfs:comment  "Anything with a location: countries, NUTS regions, addresses."@en .
+
+# ─── Shared object properties ─────────────────────────────────────
+
+fontem:locatedIn
+    a owl:ObjectProperty ;
+    rdfs:label    "located in"@en ;
+    rdfs:comment  "Located in an administrative territorial entity (NUTS region, country)."@en ;
+    rdfs:domain   fontem:Organisation ;
+    rdfs:range    fontem:GeographicEntity ;
+    owl:equivalentProperty wdt:P131 .
+
+# ─── Datatype properties (when not directly using Wikidata) ──────
+
+# Note: rdfs:label, skos:altLabel, rdfs:comment, wdt:P17 (country),
+# wdt:P571 (inception), wdt:P576 (dissolution) are used DIRECTLY in
+# instance data — we don't mint Fontem-specific wrappers for them.
+
+# ─── Identification & versioning metadata (Fontem-specific) ──────
+
+fontem:gmrId
+    a owl:DatatypeProperty , owl:FunctionalProperty ;
+    rdfs:label    "GMR identifier"@en ;
+    rdfs:comment  "Stable Fontem-internal UUID5 derived from natural keys. Embedded in the entity IRI so this property is rarely read directly; included here for SHACL constraint reference."@en ;
+    rdfs:range    xsd:string .
+
+fontem:loadedAt
+    a owl:DatatypeProperty ;
+    rdfs:label    "loaded at"@en ;
+    rdfs:comment  "Timestamp of the most recent ETL load that wrote this entity. Used for staleness detection."@en ;
+    rdfs:range    xsd:dateTime .

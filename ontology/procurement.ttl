@@ -1,29 +1,152 @@
 # Procurement ontology — TED domain.
 #
-# Status: stub. Populated during Phase 0.
-#
-# Scope: Authority, Contract, awarded / awardedTo predicates, and
-# the property chain that derives :client / :supplier from those —
-# the axiom that retires materialize_trade_edges and the eu-LISA
-# bug class. CPV taxonomy alignment also lives here.
+# Authority, Contract, awarded / awardedTo, the property chain that
+# derives :client / :supplier (the axiom that retires
+# materialize_trade_edges and makes the eu-LISA bug class
+# structurally impossible). CPV taxonomy as a SKOS concept scheme.
 
-@prefix fontem:   <http://data.fontem.eu/ontology#> .
-@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix owl:      <http://www.w3.org/2002/07/owl#> .
-@prefix wd:       <http://www.wikidata.org/entity/> .
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix rdf:       <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:       <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:      <http://www.w3.org/2004/02/skos/core#> .
+@prefix wd:        <http://www.wikidata.org/entity/> .
+@prefix wdt:       <http://www.wikidata.org/prop/direct/> .
 
 <http://data.fontem.eu/ontology/procurement>
     a owl:Ontology ;
-    rdfs:label "Fontem procurement ontology"@en ;
-    owl:imports <http://data.fontem.eu/ontology> ;
-    owl:versionInfo "0.0.1-draft" .
+    rdfs:label    "Fontem procurement ontology"@en ;
+    owl:imports   <http://data.fontem.eu/ontology> ;
+    owl:versionInfo "0.1.0" .
 
-# TBox to be filled in during Phase 0.
-# Reference axioms (drafted in MIGRATION.md):
-#   fontem:Authority    rdfs:subClassOf fontem:Organisation, wd:Q327333 .
-#   fontem:Contract     rdfs:subClassOf fontem:Document, wd:Q2334719 .
-#   fontem:awarded      rdfs:domain fontem:Authority ; rdfs:range fontem:Contract .
-#   fontem:awardedTo    rdfs:domain fontem:Contract ; rdfs:range fontem:Company .
-#   fontem:client       owl:propertyChainAxiom ( fontem:awarded fontem:awardedTo ) .
-#   fontem:supplier     owl:inverseOf fontem:client .
+# ─── Classes ──────────────────────────────────────────────────────
+
+fontem:Authority
+    a owl:Class ;
+    rdfs:label    "Contracting authority"@en ;
+    rdfs:comment  "An EU contracting authority — government agency, ministry, or public body subject to EU public-procurement law."@en ;
+    rdfs:subClassOf fontem:Organisation , wd:Q294272 .
+
+fontem:Contract
+    a owl:Class ;
+    rdfs:label    "Public contract"@en ;
+    rdfs:comment  "A public procurement contract notice as published on TED (the EU Tenders Electronic Daily). Each Contract is awarded by exactly one Authority and to exactly one Company."@en ;
+    rdfs:subClassOf fontem:Document , wd:Q529458 .
+
+fontem:CPVCategory
+    a owl:Class ;
+    rdfs:label    "CPV category"@en ;
+    rdfs:comment  "Common Procurement Vocabulary (CPV) category — the EU's classification taxonomy for public procurement subject matter."@en ;
+    rdfs:subClassOf skos:Concept , wd:Q1500936 .
+
+fontem:CPVScheme
+    a skos:ConceptScheme ;
+    rdfs:label    "Common Procurement Vocabulary"@en ;
+    skos:notation "CPV" .
+
+# ─── Object properties ────────────────────────────────────────────
+
+fontem:awarded
+    a owl:ObjectProperty ;
+    rdfs:label    "awarded"@en ;
+    rdfs:comment  "An Authority awarded a Contract."@en ;
+    rdfs:domain   fontem:Authority ;
+    rdfs:range    fontem:Contract .
+
+fontem:awardedTo
+    a owl:ObjectProperty , owl:FunctionalProperty ;
+    rdfs:label    "awarded to"@en ;
+    rdfs:comment  "A Contract was awarded to a Company. Functional — every contract has exactly one awardee."@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    fontem:Company .
+
+# ─── The axiom that retires materialize_trade_edges ──────────────
+#
+# fontem:client materialises via OWL property chain. Every
+# (Authority, Company) pair that's connected through any contract
+# becomes a :client triple — derived, never stored, always in sync
+# with the underlying AWARDED graph.
+
+fontem:client
+    a owl:ObjectProperty ;
+    rdfs:label    "client of"@en ;
+    rdfs:comment  "Authority that has procured from a Company through any Contract. Derived via property chain from fontem:awarded ∘ fontem:awardedTo — no ETL maintains it; the reasoner produces it on every load. Replaces the old materialised CLIENT_OF edge that produced the eu-LISA bug class."@en ;
+    rdfs:domain   fontem:Authority ;
+    rdfs:range    fontem:Company ;
+    owl:propertyChainAxiom ( fontem:awarded fontem:awardedTo ) .
+
+fontem:supplier
+    a owl:ObjectProperty ;
+    rdfs:label    "supplier of"@en ;
+    rdfs:comment  "A Company that has supplied to an Authority through any Contract. Inverse of fontem:client; reasoner produces both sides from the same chain."@en ;
+    rdfs:domain   fontem:Company ;
+    rdfs:range    fontem:Authority ;
+    owl:inverseOf fontem:client .
+
+fontem:hasCategory
+    a owl:ObjectProperty ;
+    rdfs:label    "has CPV category"@en ;
+    rdfs:comment  "Subject-matter classification of a Contract via its main CPV code."@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    fontem:CPVCategory ;
+    rdfs:subPropertyOf skos:related .
+
+# ─── Datatype properties ──────────────────────────────────────────
+
+fontem:tedNoticeId
+    a owl:DatatypeProperty , owl:FunctionalProperty ;
+    rdfs:label    "TED notice id"@en ;
+    rdfs:comment  "TED publication identifier, e.g. '2024-OJS-123-456789'. Embedded in the Contract IRI."@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    xsd:string .
+
+fontem:tedUrl
+    a owl:DatatypeProperty ;
+    rdfs:label    "TED URL"@en ;
+    rdfs:comment  "Direct link to the contract notice on ted.europa.eu."@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    xsd:anyURI .
+
+fontem:awardDate
+    a owl:DatatypeProperty ;
+    rdfs:label    "award date"@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    xsd:date .
+
+fontem:publicationDate
+    a owl:DatatypeProperty ;
+    rdfs:label    "publication date"@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    xsd:date .
+
+fontem:contractValueEur
+    a owl:DatatypeProperty ;
+    rdfs:label    "contract value (EUR)"@en ;
+    rdfs:comment  "Awarded value normalised to EUR. May be absent (undisclosed) or imputed (currency_inferred — see provenance graph)."@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    xsd:decimal .
+
+fontem:contractValueUndisclosed
+    a owl:DatatypeProperty ;
+    rdfs:label    "value undisclosed"@en ;
+    rdfs:comment  "True when TED did not publish a contract value; distinct from 'value is zero'."@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    xsd:boolean .
+
+fontem:procedureType
+    a owl:DatatypeProperty ;
+    rdfs:label    "procedure type"@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    xsd:string .
+
+fontem:noticeType
+    a owl:DatatypeProperty ;
+    rdfs:label    "notice type"@en ;
+    rdfs:comment  "TED notice type code."@en ;
+    rdfs:domain   fontem:Contract ;
+    rdfs:range    xsd:string .
+
+# CPV code — use the Wikidata property directly. The CPVCategory
+# instance carries `wdt:P5417 "12345678"` matching the EU code.
+# Modelling note: P5417 is reused as-is; no Fontem mint.
