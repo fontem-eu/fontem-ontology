@@ -1,0 +1,122 @@
+# Virtuoso OS — single-replica StatefulSet on the staging cluster.
+#
+# Memory limit pinned at 2 GiB per the cluster-wide tightness; the
+# virtuoso.ini buffer pool sized to fit comfortably below that. CPU
+# is best-effort (5x burst headroom) — Virtuoso is bursty during
+# checkpoints and reasoner materialisation.
+#
+# Headless Service for stable DNS (`virtuoso-0.virtuoso.gmr.svc...`)
+# is not strictly needed for a one-replica set, but keeping the
+# StatefulSet shape lets us scale to a sharded layout later without
+# a manifest rewrite.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: virtuoso
+  namespace: gmr
+  labels:
+    app: virtuoso
+spec:
+  replicas: 1
+  serviceName: virtuoso-headless
+  selector:
+    matchLabels:
+      app: virtuoso
+  template:
+    metadata:
+      labels:
+        app: virtuoso
+      annotations:
+        # Match Neo4j + the rest of the data tier — long-running
+        # stateful workloads stay out of the linkerd mesh because
+        # the sidecar lifecycle complicates startup ordering and
+        # the data-tier traffic is in-cluster only (no Internet
+        # exposure that would make mTLS load-bearing).
+        linkerd.io/inject: disabled
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: virtuoso
+          image: openlink/virtuoso-opensource-7:7.2.14
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: sparql, containerPort: 8890, protocol: TCP }
+            - { name: isql,   containerPort: 1111, protocol: TCP }
+          env:
+            - name: DBA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: virtuoso-credentials
+                  key: VIRTUOSO_DBA_PASSWORD
+            - name: VIRT_Parameters_NumberOfBuffers
+              value: "180000"
+            - name: VIRT_Parameters_ServerThreads
+              value: "4"
+            - name: VIRT_HTTPServer_ServerThreads
+              value: "4"
+            - name: VIRT_URIQA_DefaultHost
+              value: "data.fontem.eu"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /database
+            - name: backup
+              mountPath: /backup
+            - name: config
+              mountPath: /opt/virtuoso-opensource/database/virtuoso.ini
+              subPath: virtuoso.ini
+              readOnly: true
+          startupProbe:
+            tcpSocket: { port: 8890 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 36   # ~3 min cold-start budget
+          readinessProbe:
+            httpGet:
+              path: /sparql?query=ASK%20%7B%7D
+              port: 8890
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 8890 }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: virtuoso-data
+        - name: backup
+          persistentVolumeClaim:
+            claimName: virtuoso-backup
+        - name: config
+          configMap:
+            name: virtuoso-config
+            items:
+              - { key: virtuoso.ini, path: virtuoso.ini }
+---
+# Headless Service for the StatefulSet's stable DNS name. ETLs and
+# the consolidator address virtuoso via the regular ClusterIP
+# Service `virtuoso` defined in 08-services.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: virtuoso-headless
+  namespace: gmr
+  labels:
+    app: virtuoso
+spec:
+  clusterIP: None
+  selector:
+    app: virtuoso
+  ports:
+    - { name: sparql, port: 8890, protocol: TCP }
+    - { name: isql,   port: 1111, protocol: TCP }

@@ -1,0 +1,62 @@
+# Internal Service for Virtuoso. ETL writers, the consolidator,
+# and gmr-api address `http://virtuoso.gmr.svc.cluster.local:8890`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: virtuoso
+  namespace: gmr
+  labels:
+    app: virtuoso
+spec:
+  type: ClusterIP
+  selector:
+    app: virtuoso
+  ports:
+    - name: sparql
+      port: 8890
+      targetPort: 8890
+      protocol: TCP
+    - name: isql
+      port: 1111
+      targetPort: 1111
+      protocol: TCP
+
+---
+# Public-facing NodePort Service for data.fontem.eu.
+#
+# The existing fontem-data NodePort lives in the `fontem`
+# namespace and currently selects the placeholder pod. Cross-
+# namespace selectors aren't a thing — so the cutover deletes
+# that Service and creates this one in `gmr` namespace.
+#
+# NodePort 31457 stays the same so the Scaleway bastion's nginx
+# upstream config doesn't change. The bastion forwards to any
+# node IP on 31457, and NodePort is cluster-scoped, so the
+# namespace move is invisible from the outside.
+#
+# This manifest is part of the close-out cutover (§1.11) — it
+# applies AFTER the Virtuoso pod is healthy and the close-out
+# verification queries have passed against the internal Service
+# above. Until that moment, the placeholder in `fontem` ns keeps
+# serving data.fontem.eu.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fontem-data
+  namespace: gmr
+  labels:
+    app: virtuoso
+    role: public
+  annotations:
+    # Marker for the close-out runbook: do not apply until §1.11.
+    fontem.eu/phase: "1-cutover"
+spec:
+  type: NodePort
+  selector:
+    app: virtuoso
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8890
+      nodePort: 31457
+      protocol: TCP

@@ -1,0 +1,69 @@
+# virtuoso.ini — sized for the staging 2 GiB cgroup.
+#
+# When the new prod node arrives, edit NumberOfBuffers,
+# MaxCheckpointRemap, ServerThreads, and the StatefulSet pod
+# resources. Nothing else changes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: virtuoso-config
+  namespace: gmr
+  labels:
+    app: virtuoso
+data:
+  virtuoso.ini: |
+    [Database]
+    DatabaseFile             = /database/virtuoso.db
+    ErrorLogFile             = /database/virtuoso.log
+    LockFile                 = /database/virtuoso.lck
+    TransactionFile          = /database/virtuoso.trx
+    xa_persistent_file       = /database/virtuoso.pxa
+    ErrorLogLevel            = 7
+    FileExtend               = 200
+    MaxCheckpointRemap       = 45000
+    Striping                 = 0
+
+    [Parameters]
+    ServerPort               = 1111
+    LiteMode                 = 0
+    DisableUnixSocket        = 1
+    DisableTcpSocket         = 0
+    NumberOfBuffers          = 180000
+    MaxDirtyBuffers          = 130000
+    MaxCheckpointRemap       = 45000
+    UnremapQuota             = 0
+    AtomicDive               = 1
+    PrefixResultNames        = 0
+    CaseMode                 = 2
+    IndexTreeMaps            = 256
+    DefaultIsolation         = 2
+    MaxClientConnections     = 20
+    MaxConnections           = 20
+    ServerThreads            = 4
+    DirsAllowed              = ., /database, /backup, /import, /opt/virtuoso-opensource/share, /opt/virtuoso-opensource/vad
+    MaxQueryCostEstimationTime = 60
+    MaxQueryExecutionTime      = 300
+
+    [HTTPServer]
+    ServerPort               = 8890
+    ServerRoot               = /opt/virtuoso-opensource/vsp
+    MaxKeepAlives            = 10
+    KeepAliveTimeout         = 10
+    HTTPThreadSize           = 280000
+    ServerThreads            = 4
+
+    [SPARQL]
+    DefaultGraph             = http://data.fontem.eu/graph/data
+    ResultSetMaxRows         = 50000
+    MaxQueryCostEstimationTime = 60
+    MaxQueryExecutionTime      = 300
+
+    [URIQA]
+    DefaultHost              = data.fontem.eu
+
+    [Plugins]
+    LoadPath                 = /opt/virtuoso-opensource/lib/virtuoso/hosting
+    Load1                    = plain, geos
+    Load2                    = plain, im
+    Load3                    = plain, mediawiki
+    Load4                    = plain, rdf_mappers
