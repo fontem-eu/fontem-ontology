@@ -1,0 +1,26 @@
+# Statically provisioned NFS PV for Virtuoso's /database directory.
+#
+# Mirrors the existing neo4j-data-pv layout — same NFS server, same
+# host-path convention. The export directory must exist on the NFS
+# server before this PV can be claimed.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: virtuoso-data-pv
+  labels:
+    app: virtuoso
+    role: data
+spec:
+  accessModes: [ReadWriteOnce]
+  capacity:
+    storage: 50Gi
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+  nfs:
+    server: 10.44.0.6
+    path: /srv/nfs/virtuoso-data
+  claimRef:
+    namespace: gmr
+    name: virtuoso-data

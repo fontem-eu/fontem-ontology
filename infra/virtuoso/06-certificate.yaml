@@ -1,0 +1,26 @@
+# cert-manager + vault-issuer mints a 30-day cert for in-cluster
+# clients that want to talk TLS directly to Virtuoso.
+#
+# Public traffic still flows bastion-terminated via NodePort 31457
+# → port 8890 (HTTP). This cert is for cluster-internal pods (ETL,
+# consolidator, gmr-api) that prefer HTTPS straight to the service.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: virtuoso-tls
+  namespace: gmr
+spec:
+  secretName: virtuoso-tls
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - virtuoso.gmr.svc.cluster.local
+    - virtuoso.gmr.svc
+    - virtuoso
+  duration: 720h     # 30 days
+  renewBefore: 168h  # renew at 7 days remaining
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always

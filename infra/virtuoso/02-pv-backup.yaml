@@ -1,0 +1,26 @@
+# Statically provisioned NFS PV for backup_online() output.
+#
+# RWX so that a future restore-drill pod can mount the same backup
+# without having to detach from Virtuoso first. Mirrors
+# neo4j-backup-pv exactly.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: virtuoso-backup-pv
+  labels:
+    app: virtuoso
+    role: backup
+spec:
+  accessModes: [ReadWriteMany]
+  capacity:
+    storage: 20Gi
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+  nfs:
+    server: 10.44.0.6
+    path: /srv/nfs/virtuoso-backup
+  claimRef:
+    namespace: gmr
+    name: virtuoso-backup
