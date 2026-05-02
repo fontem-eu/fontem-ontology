@@ -13,15 +13,16 @@
 #      manual poking via http://localhost:8890/sparql
 set -euo pipefail
 
-REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-SMOKE_DIR="$REPO_ROOT/tools/smoke"
+REPO_ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+ENGINE_DIR="$REPO_ROOT/tools/smoke/virtuoso"
+SHARED_DIR="$REPO_ROOT/tools/smoke"
 ONTOLOGY_DIR="$REPO_ROOT/ontology"
-EXPECTED_DIR="$SMOKE_DIR/expected"
-QUERIES_DIR="$SMOKE_DIR/queries"
-FIXTURES_DIR="$SMOKE_DIR/fixtures"
+EXPECTED_DIR="$SHARED_DIR/expected"
+QUERIES_DIR="$SHARED_DIR/queries"
+FIXTURES_DIR="$SHARED_DIR/fixtures"
 
-CONTAINER=fontem-ontology-smoke
-IMAGE=fontem-ontology-smoke:latest
+CONTAINER=fontem-smoke-virtuoso
+IMAGE=fontem-smoke-virtuoso:latest
 RULESET="urn:fontem:smoke:rules"
 TBOX_GRAPH="http://data.fontem.eu/graph/tbox"
 DATA_GRAPH="http://data.fontem.eu/graph/data"
@@ -41,7 +42,7 @@ trap cleanup EXIT
 # Build context is the repo root because the Dockerfile COPYs from
 # ontology/ and tools/smoke/fixtures/.
 echo "==> building $IMAGE"
-docker build -q -f "$SMOKE_DIR/Dockerfile" -t "$IMAGE" "$REPO_ROOT" >/dev/null
+docker build -q -f "$ENGINE_DIR/Dockerfile" -t "$IMAGE" "$REPO_ROOT" >/dev/null
 
 # ── 2. Run. TBox + fixtures are baked into the image at /import.
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -96,7 +97,7 @@ printf "rdfs_rule_set('%s', '%s');\n" "$RULESET" "$TBOX_GRAPH" | isql >/dev/null
 # data graph, then the reasoner uses owl:inverseOf to derive the
 # supplier side from the client side.
 echo "==> materialising property chains (Virtuoso lacks owl:propertyChainAxiom)"
-chain_query=$(grep -v '^[[:space:]]*#' "$SMOKE_DIR/post-load.sparql" | grep -v '^[[:space:]]*$')
+chain_query=$(grep -v '^[[:space:]]*#' "$ENGINE_DIR/post-load.sparql" | grep -v '^[[:space:]]*$')
 {
     printf "SPARQL\n%s\n;\n" "$chain_query"
 } | isql >/dev/null

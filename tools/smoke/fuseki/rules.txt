@@ -1,0 +1,58 @@
+# Jena rules file for the Fontem reasoner smoke.
+#
+# We need three rule families to satisfy the four verification queries:
+#
+#   1. Property chain — fontem:client derived from
+#      fontem:awarded ∘ fontem:awardedTo. (Replaces what
+#      owl:propertyChainAxiom should do but Jena's bundled reasoner
+#      ignores.)
+#
+#   2. Inverse — fontem:supplier as the inverse of fontem:client.
+#      (We could express this as owl:inverseOf in the TBox and let
+#      the reasoner derive it, but encoding it as a rule keeps the
+#      Fuseki engine standalone — no dependency on which OWL axioms
+#      the underlying reasoner happens to honour.)
+#
+#   3. RDFS subClassOf transitivity — for the class-hierarchy query
+#      (e.g. fontem:Authority is also wd:Q294272 is also fontem:Organisation
+#       is also fontem:Agent). GenericRuleReasoner doesn't auto-include
+#      RDFS rules; we encode the one we need.
+
+@prefix fontem:  <http://data.fontem.eu/ontology#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+
+# ── Property chain ────────────────────────────────────────────────
+#
+# Same axiom as procurement.ttl declares with owl:propertyChainAxiom.
+# We rewrite as a Jena rule because the bundled reasoner doesn't
+# pick up the OWL2 axiom.
+
+[client_chain:
+    (?auth fontem:awarded   ?ct)
+    (?ct   fontem:awardedTo ?co)
+    -> (?auth fontem:client ?co)
+]
+
+# ── Inverse: fontem:supplier as inverse of fontem:client ──────────
+
+[supplier_inverse:
+    (?auth fontem:client ?co)
+    -> (?co fontem:supplier ?auth)
+]
+
+# ── RDFS subClassOf — transitive closure + instance propagation ───
+#
+# GenericRuleReasoner doesn't include the RDFS ruleset by default;
+# we add the two rules we actually need for the class-hierarchy
+# verification query (Authority is-a Organisation is-a Agent).
+
+[subclass_transitive:
+    (?a rdfs:subClassOf ?b) (?b rdfs:subClassOf ?c)
+    -> (?a rdfs:subClassOf ?c)
+]
+
+[type_via_subclass:
+    (?x rdf:type ?a) (?a rdfs:subClassOf ?b)
+    -> (?x rdf:type ?b)
+]

@@ -10,13 +10,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Build + run the dockerised smoke. Image is built from the
-      # repo root because the Dockerfile COPYs from ontology/ and
-      # tools/smoke/fixtures/. The runner script handles the
-      # container lifecycle (build, run, wait, load, query, diff,
-      # cleanup) and exits non-zero on any mismatch.
-      - name: Run reasoner smoke
-        run: bash tools/smoke/run.sh
+      # Run both engines sequentially — Virtuoso and Fuseki. Each
+      # builds its image from repo root (ontology/ + fixtures are
+      # COPYed in), spins a container, loads TBox + fixtures, runs
+      # the verification queries, diffs against expected output,
+      # exits non-zero on any mismatch.
+      #
+      # Why both: Phase 0 surfaced that NEITHER engine implements
+      # owl:propertyChainAxiom from the declared TBox. Their
+      # workarounds have different drift properties, and the
+      # comparison informed the Phase 1 substrate decision.
+      # See tools/smoke/COMPARISON.md.
+      - name: Run both reasoner smokes
+        run: bash tools/smoke/run-all.sh
 
       # Surface the smoke status to the PR via job result; merge to
       # main is gated on this passing.
