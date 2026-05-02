@@ -440,15 +440,15 @@ its selector swaps from the placeholder pod to the Virtuoso pod
 on cutover. Bastion-side nginx config unchanged. NodePort 31457
 unchanged.
 
-## 1.2 `virtuoso.ini` tuning for staging (4 GiB cgroup)
+## 1.2 `virtuoso.ini` tuning for staging (2 GiB cgroup)
 
 ```ini
 [Parameters]
-NumberOfBuffers          = 350000    ; ~2.7 GiB working set (each = 8 KiB)
-MaxCheckpointRemap       = 87500     ; 25% of NumberOfBuffers
+NumberOfBuffers          = 180000    ; ~1.4 GiB working set (each = 8 KiB)
+MaxCheckpointRemap       = 45000     ; 25% of NumberOfBuffers
 DefaultIsolation         = 2         ; read committed
-MaxClientConnections     = 30
-ServerThreads            = 8
+MaxClientConnections     = 20
+ServerThreads            = 4
 IndexTreeMaps            = 256
 DirsAllowed              = ., /opt/virtuoso-opensource/share, /opt/virtuoso-opensource/vad, /import, /backup
 MaxQueryCostEstimationTime = 60
@@ -457,7 +457,7 @@ MaxQueryExecutionTime      = 300
 [HTTPServer]
 ServerPort                 = 8890
 HTTPThreadSize             = 280000
-ServerThreads              = 8
+ServerThreads              = 4
 KeepAliveTimeout           = 10
 
 [SPARQL]
@@ -467,13 +467,17 @@ MaxQueryCostEstimationTime = 60
 MaxQueryExecutionTime      = 300
 ```
 
-Pod resources to match: `requests: { cpu: 1, memory: 2Gi }`,
-`limits: { cpu: 4, memory: 4Gi }`. Same shape as the existing
-Neo4j deployment.
+Pod resources: `requests: { cpu: 500m, memory: 1Gi }`,
+`limits: { cpu: 2, memory: 2Gi }`. The cluster is tight, so we
+hold a hard 2 GiB ceiling for now. Headroom inside the cgroup is
+~600 MiB above the buffer pool — enough for the (JVM-less)
+Virtuoso process + page cache, not much else. If we observe
+OOM-kills or query latency from buffer thrashing, raise the
+cgroup first; OOM-killing the database is a bad day.
 
 When the prod node arrives we update the ConfigMap to push
-NumberOfBuffers to ~2,500,000 (~19 GiB) and bump the cgroup limit
-to 20 GiB. No other change.
+NumberOfBuffers up (e.g. 2,500,000 ≈ 19 GiB) and bump the cgroup
+limit. No other change.
 
 ## 1.3 Postgres pgvector sidecar
 
