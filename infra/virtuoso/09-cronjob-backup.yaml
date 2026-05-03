@@ -1,11 +1,26 @@
-# Daily backup_online() at 04:00 UTC. Output lands in /backup
-# (the NFS-backed RWX PVC). 7-day retention; the script prunes
-# anything older.
+# Daily SPARQL-CONSTRUCT graph dump at 04:00 UTC. Output lands
+# in /backup (the NFS-backed RWX PVC). 7-day retention; the
+# script prunes anything older.
+#
+# Why CONSTRUCT and not backup_online():
+#   - backup_online() in Virtuoso 7.2.14 has a known quirk where
+#     BackupDir is read as null at the C level even when the ini
+#     value is correct (cfg_item_value reports the right path,
+#     but the backup function panics with "(null)/<prefix>"). We
+#     fought this for several iterations; the staging dataset is
+#     small enough that a portable text dump is the cleaner exit.
+#   - N-Triples dumps are version-portable: any RDF store can
+#     reload them, including a future GraphDB / Stardog if we
+#     ever switch engines.
+#   - Trade-off: blank nodes get fresh IDs on reload, and Virtuoso-
+#     specific inferred triples are NOT in the dump (only asserted
+#     triples are). That's fine here because the reasoner re-runs
+#     on load and re-derives them.
 #
 # Restore drill: spin a throwaway second Virtuoso pod, mount the
-# same /backup PVC (RWX), point its DatabaseFile at a copied
-# backup, run the smoke verification queries. Documented in the
-# runbook (infra/virtuoso/RUNBOOK.md).
+# same /backup PVC (RWX), HTTP-POST each .nt back via
+# /sparql-graph-crud-auth, run the smoke verification queries.
+# Documented in the runbook (infra/virtuoso/RUNBOOK.md).
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -28,12 +43,20 @@ spec:
           labels:
             app: virtuoso
             role: backup
+          annotations:
+            # Same exemption as the StatefulSet — linkerd-proxy in a
+            # short-lived Job leaves the pod in NotReady forever
+            # because the sidecar doesn't exit when the main
+            # container does.
+            linkerd.io/inject: disabled
         spec:
           restartPolicy: Never
+          imagePullSecrets:
+            - name: regcred
           containers:
             - name: backup
-              image: openlink/virtuoso-opensource-7:7.2.14
-              command: ["/bin/sh", "-c"]
+              image: contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
+              command: ["/bin/bash", "-c"]
               env:
                 - name: DBA_PASSWORD
                   valueFrom:
@@ -54,17 +77,51 @@ spec:
                 - |
                   set -euo pipefail
                   STAMP=$(date -u +%Y%m%d-%H%M%S)
-                  DEST=/backup/virtuoso-${STAMP}
+                  DEST="/backup/virtuoso-${STAMP}"
+                  mkdir -p "$DEST"
                   echo "==> backup to $DEST"
 
-                  # backup_online() runs against the live Virtuoso
-                  # pod. We talk over the cluster network rather
-                  # than executing inside the data pod itself so a
-                  # busy database never has the backup process
-                  # competing for its memory budget.
+                  # Trigger a checkpoint so the dump catches a
+                  # consistent on-disk view, then enumerate user
+                  # graphs (anything under data.fontem.eu/graph/*)
+                  # and dump each via SPARQL CONSTRUCT in
+                  # N-Triples form.
+                  SPARQL=http://virtuoso.gmr.svc.cluster.local:8890/sparql
                   /opt/virtuoso-opensource/bin/isql \
-                      virtuoso.gmr.svc.cluster.local 1111 dba "$DBA_PASSWORD" \
-                      -c "EXEC=backup_online ('$DEST/dump-', 50, 0, vector ())"
+                      virtuoso.gmr.svc.cluster.local:1111 dba "$DBA_PASSWORD" \
+                      exec="checkpoint;"
+
+                  # POST queries with application/sparql-query (RFC
+                  # 8089-style) — sidesteps URL-encoding entirely.
+                  list_q="$DEST/.list.rq"
+                  cat > "$list_q" <<'EOF'
+                  SELECT DISTINCT ?g WHERE {
+                      GRAPH ?g { ?s ?p ?o }
+                      FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+                  }
+                  EOF
+                  GRAPHS=$(wget -qO- \
+                      --header='Content-Type: application/sparql-query' \
+                      --header='Accept: text/csv' \
+                      --post-file="$list_q" "$SPARQL" \
+                      | tr -d '\r' | tail -n +2 | sed 's/"//g')
+                  rm -f "$list_q"
+                  echo "==> graphs to dump:"; echo "$GRAPHS" | sed 's/^/    /'
+
+                  for graph in $GRAPHS; do
+                      slug=$(echo "$graph" | sed 's|http://data.fontem.eu/graph/||;s|/|_|g')
+                      out="$DEST/${slug}.nt"
+                      q="$DEST/.q.rq"
+                      printf 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <%s> { ?s ?p ?o } }' "$graph" > "$q"
+                      echo "  - $graph -> $out"
+                      wget -qO "$out" \
+                          --header='Content-Type: application/sparql-query' \
+                          --header='Accept: application/n-triples' \
+                          --post-file="$q" "$SPARQL"
+                      rm -f "$q"
+                      bytes=$(stat -c %s "$out")
+                      echo "    ${bytes} bytes"
+                  done
 
                   # Retention: keep the 7 most recent backup
                   # directories, prune older ones. Sort by name
