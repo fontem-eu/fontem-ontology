@@ -1,0 +1,25 @@
+# Prometheus scrape config for the virtuoso-exporter sidecar.
+# Selects the headless Service's `metrics` port (9477).
+#
+# `release: monitoring-stack` is the discovery label the
+# kube-prometheus-stack operator filters on; matches the
+# pattern already in use by the gmr-api ServiceMonitor.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: virtuoso
+  namespace: gmr
+  labels:
+    app: virtuoso
+    release: monitoring-stack
+spec:
+  selector:
+    matchLabels:
+      app: virtuoso
+  namespaceSelector:
+    matchNames: [gmr]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

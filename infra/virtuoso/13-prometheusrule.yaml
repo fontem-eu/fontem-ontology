@@ -1,0 +1,70 @@
+# Alerts for the virtuoso pod + backup CronJob. Starts
+# conservative — we'll tighten thresholds after a couple weeks
+# of baseline data.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: virtuoso-alerts
+  namespace: gmr
+  labels:
+    app: virtuoso
+    release: monitoring-stack
+spec:
+  groups:
+    - name: virtuoso
+      rules:
+        # Pod is gone or unreachable for >5m. The exporter sets
+        # virtuoso_up=0 if the last status() call failed; if the
+        # whole pod is down, the metric is absent entirely.
+        - alert: VirtuosoDown
+          expr: max(up{job=~".*virtuoso.*"} == 0) or absent(up{job=~".*virtuoso.*"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Virtuoso is down
+            description: The virtuoso pod hasn't responded to scrapes for 5+ minutes.
+
+        # SPARQL probe is failing — pod is up but query path is
+        # broken (deadlock, OOM in the SQL stack, etc.).
+        - alert: VirtuosoSparqlAskFailing
+          expr: rate(virtuoso_sparql_ask_failures_total[5m]) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Virtuoso SPARQL ASK probe is failing
+            description: |
+              ASK probe has been failing at >0.1/s for 10m+.
+              Either the HTTP server is wedged or the engine is
+              not processing reads.
+
+        # Backup CronJob hasn't completed in >25h. We schedule
+        # daily; >25h means we missed at least one window.
+        # Sourced from kube-state-metrics, no exporter work.
+        - alert: VirtuosoBackupStale
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{namespace="gmr",cronjob="virtuoso-backup"} > 90000
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Virtuoso backup hasn't run in 25+ hours
+            description: |
+              CronJob virtuoso-backup last succeeded >25h ago.
+              Investigate the last Job's logs in the gmr ns.
+
+        # Dirty buffer pressure — sustained high dirty-buffer
+        # ratio means the checkpointer is falling behind. 80%
+        # is well above normal (single-digit % at idle).
+        - alert: VirtuosoHighDirtyBuffers
+          expr: virtuoso_buffers_dirty / virtuoso_buffers_total > 0.8
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Virtuoso dirty-buffer ratio is high
+            description: |
+              >80% of buffers dirty for 15m+. The checkpointer
+              is not keeping up; a hard checkpoint may stall
+              writes. Bump CheckpointInterval down or add IO.
