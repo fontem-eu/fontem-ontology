@@ -92,6 +92,27 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
+        # Sidecar — translates `isql status('')` + a SPARQL ASK
+        # probe into Prometheus metrics on :9477. Lives in the
+        # same pod so it can talk to localhost without crossing
+        # any Service boundary.
+        - name: exporter
+          image: contribute.void42.internal/golden/virtuoso-exporter:0.1.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DBA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: virtuoso-credentials
+                  key: VIRTUOSO_DBA_PASSWORD
+          ports:
+            - { name: metrics, containerPort: 9477, protocol: TCP }
+          resources:
+            requests: { cpu: 10m,  memory: 32Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9477 }
+            periodSeconds: 30
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -120,5 +141,6 @@ spec:
   selector:
     app: virtuoso
   ports:
-    - { name: sparql, port: 8890, protocol: TCP }
-    - { name: isql,   port: 1111, protocol: TCP }
+    - { name: sparql,  port: 8890, protocol: TCP }
+    - { name: isql,    port: 1111, protocol: TCP }
+    - { name: metrics, port: 9477, protocol: TCP }
