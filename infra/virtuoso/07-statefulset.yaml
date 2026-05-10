@@ -52,6 +52,16 @@ spec:
                 secretKeyRef:
                   name: virtuoso-credentials
                   key: VIRTUOSO_DBA_PASSWORD
+            # The upstream entrypoint reads $VIRTUOSO_INI_FILE only when
+            # /database/virtuoso.ini doesn't exist. We deliberately mount
+            # the configmap at a non-magic path (see volumes below)
+            # instead of subPath-shadowing /database/virtuoso.ini — the
+            # subPath approach creates a real file before the entrypoint
+            # runs, so its `[ ! -f virtuoso.ini ]` check skips init,
+            # which skips password-set and leaves the fresh DB on the
+            # default dba/dba credentials.
+            - name: VIRTUOSO_INI_FILE
+              value: /etc/virtuoso-config/virtuoso.ini
             - name: VIRT_Parameters_NumberOfBuffers
               value: "180000"
             - name: VIRT_Parameters_ServerThreads
@@ -73,8 +83,7 @@ spec:
             - name: backup
               mountPath: /backup
             - name: config
-              mountPath: /opt/virtuoso-opensource/database/virtuoso.ini
-              subPath: virtuoso.ini
+              mountPath: /etc/virtuoso-config
               readOnly: true
           startupProbe:
             tcpSocket: { port: 8890 }
