@@ -88,8 +88,13 @@ spec:
           startupProbe:
             tcpSocket: { port: 8890 }
             initialDelaySeconds: 10
-            periodSeconds: 5
-            failureThreshold: 36   # ~3 min cold-start budget
+            periodSeconds: 10
+            # ~60 min cold-start budget. A restart with a busy sink can
+            # leave ~3M unflushed transactions to roll forward at
+            # ~5k tx/s — the prior 3-min budget killed us mid-replay
+            # and we crash-looped, each retry having a longer log than
+            # the last because the sink kept writing.
+            failureThreshold: 360
           readinessProbe:
             httpGet:
               path: /sparql?query=ASK%20%7B%7D
