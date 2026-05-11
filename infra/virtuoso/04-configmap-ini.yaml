@@ -37,9 +37,9 @@ data:
     CaseMode                 = 2
     IndexTreeMaps            = 256
     DefaultIsolation         = 2
-    MaxClientConnections     = 20
-    MaxConnections           = 20
-    ServerThreads            = 4
+    MaxClientConnections     = 40
+    MaxConnections           = 40
+    ServerThreads            = 12
     DirsAllowed              = ., /database, /backup, /import, /opt/virtuoso-opensource/share, /opt/virtuoso-opensource/vad
     MaxQueryCostEstimationTime = 60
     MaxQueryExecutionTime      = 300
@@ -50,7 +50,12 @@ data:
     MaxKeepAlives            = 10
     KeepAliveTimeout         = 10
     HTTPThreadSize           = 280000
-    ServerThreads            = 4
+    # Bumped from 4 → 16 because a single-threaded sink at ~280 evt/s
+    # was saturating all SQL threads, leaving SPARQL read queries
+    # starved — /api/data-quality 504'd on the count(SanctionedEntity)
+    # call while a bulk replay was in flight. 16 lets a few reads
+    # land in parallel without slowing the writer.
+    ServerThreads            = 16
 
     [SPARQL]
     DefaultGraph             = http://data.fontem.eu/graph/data
