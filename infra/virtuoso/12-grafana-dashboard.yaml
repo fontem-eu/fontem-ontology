@@ -3,6 +3,12 @@
 # Discovery: kube-prometheus-stack's grafana sidecar picks up
 # any ConfigMap labelled `grafana_dashboard: "1"` and mounts
 # its data into Grafana as a JSON dashboard.
+#
+# Covers BOTH the virtuoso StatefulSet (via the virtuoso-exporter
+# sidecar on :9477) AND the virtuoso-sink Deployment (gmr_events
+# library metrics on :9100), scoped by a `namespace` template
+# variable so the same dashboard works for staging (gmr ns) and
+# production (fontem-prod ns).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,7 +25,7 @@ data:
       "tags": ["virtuoso", "gmr", "data"],
       "timezone": "browser",
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "editable": true,
       "time": { "from": "now-6h", "to": "now" },
       "refresh": "30s",
@@ -31,16 +37,33 @@ data:
             "label": "Datasource",
             "query": "prometheus",
             "current": { "text": "Prometheus", "value": "prometheus" }
+          },
+          {
+            "type": "query",
+            "name": "namespace",
+            "label": "Namespace",
+            "datasource": "${datasource}",
+            "query": "label_values(virtuoso_up, namespace)",
+            "refresh": 1,
+            "sort": 1,
+            "includeAll": false,
+            "current": { "text": "fontem-prod", "value": "fontem-prod" }
           }
         ]
       },
       "panels": [
         {
+          "type": "row",
+          "title": "Health",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
           "type": "stat",
           "title": "Up",
           "datasource": "${datasource}",
-          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
-          "targets": [{ "expr": "virtuoso_up", "refId": "A" }],
+          "gridPos": { "h": 4, "w": 3, "x": 0, "y": 1 },
+          "targets": [{ "expr": "virtuoso_up{namespace=\"$namespace\"}", "refId": "A" }],
           "options": {
             "colorMode": "background",
             "graphMode": "none",
@@ -59,27 +82,66 @@ data:
           "type": "stat",
           "title": "Uptime",
           "datasource": "${datasource}",
-          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
-          "targets": [{ "expr": "virtuoso_uptime_seconds", "refId": "A" }],
+          "gridPos": { "h": 4, "w": 3, "x": 3, "y": 1 },
+          "targets": [{ "expr": "virtuoso_uptime_seconds{namespace=\"$namespace\"}", "refId": "A" }],
           "fieldConfig": { "defaults": { "unit": "s" } }
         },
         {
           "type": "stat",
           "title": "DB size",
           "datasource": "${datasource}",
-          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
-          "targets": [{ "expr": "virtuoso_db_file_bytes", "refId": "A" }],
+          "gridPos": { "h": 4, "w": 3, "x": 6, "y": 1 },
+          "targets": [{ "expr": "virtuoso_db_file_bytes{namespace=\"$namespace\"}", "refId": "A" }],
           "fieldConfig": { "defaults": { "unit": "decbytes" } }
+        },
+        {
+          "type": "stat",
+          "title": "RSS",
+          "datasource": "${datasource}",
+          "gridPos": { "h": 4, "w": 3, "x": 9, "y": 1 },
+          "targets": [{ "expr": "virtuoso_rss_bytes{namespace=\"$namespace\"}", "refId": "A" }],
+          "fieldConfig": { "defaults": { "unit": "decbytes" } }
+        },
+        {
+          "type": "stat",
+          "title": "Buffer-pool used %",
+          "datasource": "${datasource}",
+          "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 },
+          "targets": [{
+            "expr": "100 * virtuoso_buffers_used{namespace=\"$namespace\"} / virtuoso_buffers_total{namespace=\"$namespace\"}",
+            "refId": "A"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 80 },
+                  { "color": "red", "value": 95 }
+                ]
+              }
+            }
+          },
+          "options": { "colorMode": "background" }
+        },
+        {
+          "type": "stat",
+          "title": "Clients",
+          "datasource": "${datasource}",
+          "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 },
+          "targets": [{ "expr": "virtuoso_clients_concurrent{namespace=\"$namespace\"}", "refId": "A" }]
         },
         {
           "type": "stat",
           "title": "Backup age",
           "datasource": "${datasource}",
-          "description": "Seconds since last successful virtuoso-backup CronJob run.",
-          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+          "description": "Seconds since last successful virtuoso-backup CronJob run. Red >25h.",
+          "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 },
           "targets": [
             {
-              "expr": "time() - kube_cronjob_status_last_successful_time{namespace=\"gmr\",cronjob=\"virtuoso-backup\"}",
+              "expr": "time() - kube_cronjob_status_last_successful_time{namespace=\"$namespace\",cronjob=\"virtuoso-backup\"}",
               "refId": "A"
             }
           ],
@@ -99,14 +161,44 @@ data:
           "options": { "colorMode": "background" }
         },
         {
+          "type": "stat",
+          "title": "Auth fails / min",
+          "datasource": "${datasource}",
+          "description": "Failed isql/HTTP logins on Virtuoso (from log scraper). Spikes here usually mean a consumer or ETL job has a stale password.",
+          "gridPos": { "h": 4, "w": 3, "x": 21, "y": 1 },
+          "targets": [
+            { "expr": "increase(virtuoso_auth_failures_total{namespace=\"$namespace\"}[1m])", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 10 }
+                ]
+              }
+            }
+          },
+          "options": { "colorMode": "background" }
+        },
+
+        {
+          "type": "row",
+          "title": "Server",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
           "type": "timeseries",
           "title": "SPARQL ASK latency (probe)",
           "datasource": "${datasource}",
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
           "targets": [
-            { "expr": "histogram_quantile(0.5, sum by (le) (rate(virtuoso_sparql_ask_duration_seconds_bucket[5m])))",  "legendFormat": "p50",  "refId": "A" },
-            { "expr": "histogram_quantile(0.95, sum by (le) (rate(virtuoso_sparql_ask_duration_seconds_bucket[5m])))", "legendFormat": "p95",  "refId": "B" },
-            { "expr": "histogram_quantile(0.99, sum by (le) (rate(virtuoso_sparql_ask_duration_seconds_bucket[5m])))", "legendFormat": "p99",  "refId": "C" }
+            { "expr": "histogram_quantile(0.5,  sum by (le) (rate(virtuoso_sparql_ask_duration_seconds_bucket{namespace=\"$namespace\"}[5m])))", "legendFormat": "p50", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(virtuoso_sparql_ask_duration_seconds_bucket{namespace=\"$namespace\"}[5m])))", "legendFormat": "p95", "refId": "B" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(virtuoso_sparql_ask_duration_seconds_bucket{namespace=\"$namespace\"}[5m])))", "legendFormat": "p99", "refId": "C" }
           ],
           "fieldConfig": { "defaults": { "unit": "s" } }
         },
@@ -114,32 +206,34 @@ data:
           "type": "timeseries",
           "title": "Buffer pool",
           "datasource": "${datasource}",
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
           "targets": [
-            { "expr": "virtuoso_buffers_used",  "legendFormat": "used",  "refId": "A" },
-            { "expr": "virtuoso_buffers_dirty", "legendFormat": "dirty", "refId": "B" },
-            { "expr": "virtuoso_buffers_total", "legendFormat": "total", "refId": "C" }
+            { "expr": "virtuoso_buffers_used{namespace=\"$namespace\"}",  "legendFormat": "used",  "refId": "A" },
+            { "expr": "virtuoso_buffers_dirty{namespace=\"$namespace\"}", "legendFormat": "dirty", "refId": "B" },
+            { "expr": "virtuoso_buffers_total{namespace=\"$namespace\"}", "legendFormat": "total", "refId": "C" }
           ]
         },
         {
           "type": "timeseries",
           "title": "Threads + clients",
           "datasource": "${datasource}",
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+          "description": "When threads_running flatlines at HTTPServer.ServerThreads (16 in current config) AND threads_waiting climbs, queries are getting starved — the same shape that 504'd /data-quality during the staging replay. Bump HTTPServer.ServerThreads in 04-configmap-ini.yaml.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
           "targets": [
-            { "expr": "virtuoso_threads_running",   "legendFormat": "threads running", "refId": "A" },
-            { "expr": "virtuoso_threads_waiting",   "legendFormat": "threads waiting", "refId": "B" },
-            { "expr": "virtuoso_clients_concurrent","legendFormat": "clients",         "refId": "C" }
+            { "expr": "virtuoso_threads_running{namespace=\"$namespace\"}",   "legendFormat": "threads running", "refId": "A" },
+            { "expr": "virtuoso_threads_waiting{namespace=\"$namespace\"}",   "legendFormat": "threads waiting", "refId": "B" },
+            { "expr": "virtuoso_clients_concurrent{namespace=\"$namespace\"}","legendFormat": "clients",         "refId": "C" }
           ]
         },
         {
           "type": "timeseries",
           "title": "Process memory",
           "datasource": "${datasource}",
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+          "description": "Roll-forward replay after an unclean restart can double the steady-state RSS. The pod memory limit is 4 GiB; the 2 GiB ceiling we ran on previously OOM-killed mid-replay (see RUNBOOK).",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
           "targets": [
-            { "expr": "virtuoso_rss_bytes", "legendFormat": "RSS", "refId": "A" },
-            { "expr": "virtuoso_vsz_bytes", "legendFormat": "VSZ", "refId": "B" }
+            { "expr": "virtuoso_rss_bytes{namespace=\"$namespace\"}", "legendFormat": "RSS", "refId": "A" },
+            { "expr": "virtuoso_vsz_bytes{namespace=\"$namespace\"}", "legendFormat": "VSZ", "refId": "B" }
           ],
           "fieldConfig": { "defaults": { "unit": "decbytes" } }
         },
@@ -147,20 +241,69 @@ data:
           "type": "timeseries",
           "title": "DB pages",
           "datasource": "${datasource}",
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
           "targets": [
-            { "expr": "virtuoso_db_pages_total", "legendFormat": "total", "refId": "A" },
-            { "expr": "virtuoso_db_pages_total - virtuoso_db_pages_free", "legendFormat": "used", "refId": "B" },
-            { "expr": "virtuoso_pages_changed_since_backup", "legendFormat": "changed since last backup", "refId": "C" }
+            { "expr": "virtuoso_db_pages_total{namespace=\"$namespace\"}", "legendFormat": "total", "refId": "A" },
+            { "expr": "(virtuoso_db_pages_total - virtuoso_db_pages_free){namespace=\"$namespace\"}", "legendFormat": "used", "refId": "B" },
+            { "expr": "virtuoso_pages_changed_since_backup{namespace=\"$namespace\"}", "legendFormat": "changed since last backup", "refId": "C" }
           ]
         },
         {
           "type": "timeseries",
-          "title": "Probe failures",
+          "title": "Probe failures + deadlocks",
           "datasource": "${datasource}",
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
           "targets": [
-            { "expr": "rate(virtuoso_sparql_ask_failures_total[5m])", "legendFormat": "ASK probe fail/s", "refId": "A" }
+            { "expr": "rate(virtuoso_sparql_ask_failures_total{namespace=\"$namespace\"}[5m])", "legendFormat": "ASK probe fail/s", "refId": "A" },
+            { "expr": "rate(virtuoso_deadlocks_total{namespace=\"$namespace\"}[5m])",           "legendFormat": "deadlocks/s",     "refId": "B" }
+          ]
+        },
+
+        {
+          "type": "row",
+          "title": "Sink",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
+          "collapsed": false
+        },
+        {
+          "type": "timeseries",
+          "title": "Replay lag (seconds behind newest event)",
+          "datasource": "${datasource}",
+          "description": "event_lag_seconds = wall-clock age of newest unconsumed event. Climbs during bulk replay or when Virtuoso is slow; ≈0 in steady state.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+          "targets": [
+            { "expr": "event_lag_seconds{namespace=\"$namespace\",consumer=\"virtuoso_sink\"}", "legendFormat": "virtuoso_sink", "refId": "A" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Sink throughput (events/sec)",
+          "datasource": "${datasource}",
+          "description": "Rate of successfully-applied events, broken out by event_type. Drops to zero during Virtuoso restarts.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+          "targets": [
+            { "expr": "sum by (event_type) (rate(events_processed_total{namespace=\"$namespace\",consumer=\"virtuoso_sink\"}[1m]))", "legendFormat": "{{event_type}}", "refId": "A" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Sink failures (DLQ)",
+          "datasource": "${datasource}",
+          "description": "Events that landed in events.dead_letter. Any non-zero rate here means a renderer is throwing or Virtuoso is rejecting a write — usually a schema mismatch.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 39 },
+          "targets": [
+            { "expr": "sum by (event_type) (rate(events_failed_total{namespace=\"$namespace\",consumer=\"virtuoso_sink\"}[5m]))", "legendFormat": "{{event_type}}", "refId": "A" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Sink batch size",
+          "datasource": "${datasource}",
+          "description": "Events pulled per fetch. Flat at the configured cap (default 1000) means the sink is keeping up with backpressure.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
+          "targets": [
+            { "expr": "event_batch_size{namespace=\"$namespace\",consumer=\"virtuoso_sink\"}", "legendFormat": "batch_size", "refId": "A" }
           ]
         }
       ]
