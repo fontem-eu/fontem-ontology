@@ -1,0 +1,30 @@
+# Prod Virtuoso /database PV.
+#
+# Storage lives on the local 4 TB SSD of cluster-node-3-prod, served
+# back over NFS by nfs-server.service on the same node (see
+# infra/nfs-server/host_vars/cluster-node-3-prod.yml). NFS-over-
+# loopback while the pod stays co-located, but the indirection
+# lets us scale Virtuoso onto a second prod node later without
+# moving the data.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: virtuoso-data-pv-fontem-prod
+  labels:
+    app: virtuoso
+    role: data
+    gmr/environment: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  capacity:
+    storage: 200Gi
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+  nfs:
+    server: 10.44.0.3
+    path: /srv/nfs/virtuoso-prod
+  claimRef:
+    namespace: fontem-prod
+    name: virtuoso-data

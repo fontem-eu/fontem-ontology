@@ -1,0 +1,25 @@
+# Prod Virtuoso backup PV. RWX so a future restore-drill pod can
+# read while Virtuoso writes. Same NFS server as the data PV
+# (cluster-node-3-prod).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: virtuoso-backup-pv-fontem-prod
+  labels:
+    app: virtuoso
+    role: backup
+    gmr/environment: prod
+spec:
+  accessModes: [ReadWriteMany]
+  capacity:
+    storage: 50Gi
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+  nfs:
+    server: 10.44.0.3
+    path: /srv/nfs/virtuoso-backup-prod
+  claimRef:
+    namespace: fontem-prod
+    name: virtuoso-backup

@@ -1,0 +1,73 @@
+# Prod virtuoso.ini. Same shape as staging post-incident-bumps —
+# 16 HTTP threads, 12 SQL threads, MaxConnections=40 — sized for
+# the 4 GiB cgroup. NumberOfBuffers stays at 180000 (1.5 GiB
+# pool); leave room to bump alongside memory once we know the
+# steady-state working set in prod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: virtuoso-config
+  namespace: fontem-prod
+  labels:
+    app: virtuoso
+    gmr/environment: prod
+data:
+  virtuoso.ini: |
+    [Database]
+    DatabaseFile             = /database/virtuoso.db
+    ErrorLogFile             = /database/virtuoso.log
+    LockFile                 = /database/virtuoso.lck
+    TransactionFile          = /database/virtuoso.trx
+    xa_persistent_file       = /database/virtuoso.pxa
+    ErrorLogLevel            = 7
+    FileExtend               = 200
+    MaxCheckpointRemap       = 45000
+    Striping                 = 0
+
+    [Parameters]
+    ServerPort               = 1111
+    LiteMode                 = 0
+    DisableUnixSocket        = 1
+    DisableTcpSocket         = 0
+    NumberOfBuffers          = 180000
+    MaxDirtyBuffers          = 130000
+    MaxCheckpointRemap       = 45000
+    UnremapQuota             = 0
+    AtomicDive               = 1
+    PrefixResultNames        = 0
+    CaseMode                 = 2
+    IndexTreeMaps            = 256
+    DefaultIsolation         = 2
+    MaxClientConnections     = 40
+    MaxConnections           = 40
+    ServerThreads            = 12
+    DirsAllowed              = ., /database, /backup, /import, /opt/virtuoso-opensource/share, /opt/virtuoso-opensource/vad
+    MaxQueryCostEstimationTime = 60
+    MaxQueryExecutionTime      = 300
+
+    [HTTPServer]
+    ServerPort               = 8890
+    ServerRoot               = /opt/virtuoso-opensource/vsp
+    MaxKeepAlives            = 10
+    KeepAliveTimeout         = 10
+    HTTPThreadSize           = 280000
+    # 16 HTTP threads — the staging incident showed 4 starves under
+    # a single-threaded sink at ~280 evt/s. 16 lets reads land
+    # alongside writes during bulk replay or steady ingestion.
+    ServerThreads            = 16
+
+    [SPARQL]
+    DefaultGraph             = http://data.fontem.eu/graph/data
+    ResultSetMaxRows         = 50000
+    MaxQueryCostEstimationTime = 60
+    MaxQueryExecutionTime      = 300
+
+    [URIQA]
+    DefaultHost              = data.fontem.eu
+
+    [Plugins]
+    LoadPath                 = /opt/virtuoso-opensource/lib/virtuoso/hosting
+    Load1                    = plain, geos
+    Load2                    = plain, im
+    Load3                    = plain, mediawiki
+    Load4                    = plain, rdf_mappers

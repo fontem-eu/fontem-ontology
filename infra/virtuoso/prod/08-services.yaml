@@ -1,0 +1,27 @@
+# Internal ClusterIP for the prod Virtuoso. gmr-api,
+# virtuoso-sink, and prod ETL writers address
+# `http://virtuoso.fontem-prod.svc.cluster.local:8890`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: virtuoso
+  namespace: fontem-prod
+  labels:
+    app: virtuoso
+    gmr/environment: prod
+spec:
+  type: ClusterIP
+  selector:
+    app: virtuoso
+  ports:
+    - name: sparql
+      port: 8890
+      targetPort: 8890
+      protocol: TCP
+    - name: isql
+      port: 1111
+      targetPort: 1111
+      protocol: TCP
+# No NodePort for public data.fontem.eu in prod yet — staging keeps
+# the public SPARQL endpoint via the `gmr` ns fontem-data NodePort
+# until we decide which environment serves data.fontem.eu long-term.

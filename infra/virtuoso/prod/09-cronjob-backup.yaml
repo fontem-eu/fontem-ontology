@@ -1,0 +1,117 @@
+# Prod Virtuoso backup CronJob. Same shape as staging (SPARQL
+# CONSTRUCT graph-by-graph dump, 7-day retention) — see the
+# staging cronjob for the why behind CONSTRUCT vs backup_online().
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: virtuoso-backup
+  namespace: fontem-prod
+  labels:
+    app: virtuoso
+    role: backup
+    gmr/environment: prod
+spec:
+  schedule: "0 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: virtuoso
+            role: backup
+          annotations:
+            linkerd.io/inject: disabled
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: regcred
+          # Land the backup pod on the same node as the data so the
+          # NFS hop stays loopback. The NFS export only accepts the
+          # cluster subnet (10.44.0.0/24) so off-node would still work,
+          # but loopback is cheap and predictable.
+          nodeSelector:
+            node-role.kubernetes.io/production: ""
+          tolerations:
+            - key: void42.internal/role
+              operator: Equal
+              value: prod
+              effect: NoSchedule
+          containers:
+            - name: backup
+              image: contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
+              command: ["/bin/bash", "-c"]
+              env:
+                - name: DBA_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: virtuoso-credentials
+                      key: VIRTUOSO_DBA_PASSWORD
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              args:
+                - |
+                  set -euo pipefail
+                  STAMP=$(date -u +%Y%m%d-%H%M%S)
+                  DEST="/backup/virtuoso-${STAMP}"
+                  mkdir -p "$DEST"
+                  echo "==> backup to $DEST"
+
+                  SPARQL=http://virtuoso.fontem-prod.svc.cluster.local:8890/sparql
+                  /opt/virtuoso-opensource/bin/isql \
+                      virtuoso.fontem-prod.svc.cluster.local:1111 dba "$DBA_PASSWORD" \
+                      exec="checkpoint;"
+
+                  list_q="$DEST/.list.rq"
+                  cat > "$list_q" <<'EOF'
+                  SELECT DISTINCT ?g WHERE {
+                      GRAPH ?g { ?s ?p ?o }
+                      FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+                  }
+                  EOF
+                  GRAPHS=$(wget -qO- \
+                      --header='Content-Type: application/sparql-query' \
+                      --header='Accept: text/csv' \
+                      --post-file="$list_q" "$SPARQL" \
+                      | tr -d '\r' | tail -n +2 | sed 's/"//g')
+                  rm -f "$list_q"
+                  echo "==> graphs to dump:"; echo "$GRAPHS" | sed 's/^/    /'
+
+                  for graph in $GRAPHS; do
+                      slug=$(echo "$graph" | sed 's|http://data.fontem.eu/graph/||;s|/|_|g')
+                      out="$DEST/${slug}.nt"
+                      q="$DEST/.q.rq"
+                      printf 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <%s> { ?s ?p ?o } }' "$graph" > "$q"
+                      echo "  - $graph -> $out"
+                      wget -qO "$out" \
+                          --header='Content-Type: application/sparql-query' \
+                          --header='Accept: application/n-triples' \
+                          --post-file="$q" "$SPARQL"
+                      rm -f "$q"
+                      bytes=$(stat -c %s "$out")
+                      echo "    ${bytes} bytes"
+                  done
+
+                  echo "==> pruning backups older than the 7 most recent"
+                  ls -1d /backup/virtuoso-* 2>/dev/null \
+                      | sort -r | tail -n +8 \
+                      | xargs -r rm -rf
+
+                  echo "==> backup complete; current contents:"
+                  ls -lh /backup/ | tail -20
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: virtuoso-backup
