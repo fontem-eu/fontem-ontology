@@ -73,10 +73,17 @@ spec:
           resources:
             requests:
               cpu: 500m
-              memory: 1Gi
+              memory: 2Gi
             limits:
               cpu: "2"
-              memory: 2Gi
+              # 4Gi — the buffer pool alone (NumberOfBuffers=180000 ×
+              # 8 KiB) wants ~1.5 GiB, and during roll-forward replay
+              # transient dirty-buffer overhead pushes past the prior
+              # 2 GiB limit. OOM-killed three times in a row trying
+              # to recover a busy log; 4 GiB gives the replay enough
+              # headroom and matches the working-set we want at
+              # steady-state with 16 HTTP threads + 12 SQL threads.
+              memory: 4Gi
           volumeMounts:
             - name: data
               mountPath: /database
