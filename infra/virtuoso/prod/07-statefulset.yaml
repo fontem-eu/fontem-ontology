@@ -1,0 +1,146 @@
+# Prod Virtuoso — pinned to cluster-node-3-prod via nodeSelector +
+# toleration. Storage lives on the same node's local 4 TB SSD,
+# exported back over NFS (see prod/01-pv-data.yaml).
+#
+# Sizing carries the lessons learned from the staging incident:
+#   - 4 GiB memory limit (buffer pool + roll-forward overhead)
+#   - 60-minute startup probe budget for roll-forward replay
+#   - 16 HTTP + 12 SQL server threads (in virtuoso.ini)
+#   - virtuoso.ini mounted at /etc/virtuoso-config, NOT subPath'd
+#     onto /database (which would shadow the entrypoint's
+#     [ ! -f virtuoso.ini ] check and skip password-set on a
+#     fresh DB)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: virtuoso
+  namespace: fontem-prod
+  labels:
+    app: virtuoso
+    gmr/environment: prod
+spec:
+  replicas: 1
+  serviceName: virtuoso-headless
+  selector:
+    matchLabels:
+      app: virtuoso
+  template:
+    metadata:
+      labels:
+        app: virtuoso
+      annotations:
+        linkerd.io/inject: disabled
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 1000
+      imagePullSecrets:
+        - name: regcred
+      # Pin to the dedicated production node so the pod, the NFS
+      # server it talks to, and the SSD that backs both are all
+      # on the same physical box.
+      nodeSelector:
+        node-role.kubernetes.io/production: ""
+      tolerations:
+        - key: void42.internal/role
+          operator: Equal
+          value: prod
+          effect: NoSchedule
+      containers:
+        - name: virtuoso
+          image: contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: sparql, containerPort: 8890, protocol: TCP }
+            - { name: isql,   containerPort: 1111, protocol: TCP }
+          env:
+            - name: DBA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: virtuoso-credentials
+                  key: VIRTUOSO_DBA_PASSWORD
+            - name: VIRTUOSO_INI_FILE
+              value: /etc/virtuoso-config/virtuoso.ini
+            - name: VIRT_Parameters_NumberOfBuffers
+              value: "180000"
+            - name: VIRT_URIQA_DefaultHost
+              value: "data.fontem.eu"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: data
+              mountPath: /database
+            - name: backup
+              mountPath: /backup
+            - name: config
+              mountPath: /etc/virtuoso-config
+              readOnly: true
+          startupProbe:
+            tcpSocket: { port: 8890 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            # ~60 min cold-start budget for roll-forward replay
+            # after an unclean restart. See staging incident notes.
+            failureThreshold: 360
+          readinessProbe:
+            httpGet:
+              path: /sparql?query=ASK%20%7B%7D
+              port: 8890
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 8890 }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+        - name: exporter
+          image: contribute.void42.internal/golden/virtuoso-exporter:0.1.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DBA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: virtuoso-credentials
+                  key: VIRTUOSO_DBA_PASSWORD
+          ports:
+            - { name: metrics, containerPort: 9477, protocol: TCP }
+          resources:
+            requests: { cpu: 10m,  memory: 32Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9477 }
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: virtuoso-data
+        - name: backup
+          persistentVolumeClaim:
+            claimName: virtuoso-backup
+        - name: config
+          configMap:
+            name: virtuoso-config
+            items:
+              - { key: virtuoso.ini, path: virtuoso.ini }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: virtuoso-headless
+  namespace: fontem-prod
+  labels:
+    app: virtuoso
+    gmr/environment: prod
+spec:
+  clusterIP: None
+  selector:
+    app: virtuoso
+  ports:
+    - { name: sparql,  port: 8890, protocol: TCP }
+    - { name: isql,    port: 1111, protocol: TCP }
+    - { name: metrics, port: 9477, protocol: TCP }

@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: virtuoso-data
+  namespace: fontem-prod
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 200Gi
+  volumeName: virtuoso-data-pv-fontem-prod
+  storageClassName: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: virtuoso-backup
+  namespace: fontem-prod
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 50Gi
+  volumeName: virtuoso-backup-pv-fontem-prod
+  storageClassName: ""
