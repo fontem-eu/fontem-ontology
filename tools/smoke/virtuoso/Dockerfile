@@ -8,7 +8,7 @@
 #
 # Build context expected: repository root.
 
-FROM openlink/virtuoso-opensource-7:7.2.15
+FROM openlink/virtuoso-opensource-7:7.2.16
 
 ENV VIRT_Parameters_NumberOfBuffers=32000 \
     VIRT_Parameters_MaxCheckpointRemap=8000 \
