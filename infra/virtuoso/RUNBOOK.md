@@ -94,13 +94,29 @@ kubectl wait --for=condition=ready vaultstaticsecret/virtuoso-credentials -n gmr
 kubectl apply -f 07-statefulset.yaml
 kubectl rollout status statefulset/virtuoso -n gmr --timeout=5m
 
-# Rotate dba away from the openlink default (the image's
-# DBA_PASSWORD env init only fires reliably on a freshly-empty
-# data dir; the explicit rotation is idempotent and always safe).
+# ──────────────────────────────────────────────────────────────
+# MANDATORY: rotate dba from the OpenLink default `dba/dba`.
+# ──────────────────────────────────────────────────────────────
+# The image's entrypoint runs `virtuoso-t +pwdold dba +pwddba
+# "$DBA_PASSWORD"` at init and PRINTS "The DBA password is
+# changed." in the startup log. Do not trust that line.
+# Verified empirically on a freshly-empty data dir against
+# virtuoso-opensource-7:7.2.14: the change does NOT persist —
+# login with the new password still fails, and `dba/dba`
+# remains the working credential. The fix is to rotate via
+# isql AFTER the pod is up. This block is NOT optional.
 VAULT_PW=$(kubectl get secret -n gmr virtuoso-credentials \
     -o jsonpath='{.data.VIRTUOSO_DBA_PASSWORD}' | base64 -d)
+# Bootstrap-time workaround: the StatefulSet ships DBA_PASSWORD
+# from the secret, but isql still needs to authenticate with
+# `dba/dba` to perform the rotation. If the STS env is already
+# set to the secret value, the rotation simply moves dba from
+# the default to that same value — idempotent.
 kubectl exec -n gmr virtuoso-0 -- /opt/virtuoso-opensource/bin/isql 1111 dba dba \
-    exec="user_change_password('dba', 'dba', '$VAULT_PW');"
+    exec="USER_PASSWORD_SET('dba', '$VAULT_PW'); USER_PASSWORD_SET('dav', '$VAULT_PW'); checkpoint;"
+# Sanity check: this should connect and return one row.
+kubectl exec -n gmr virtuoso-0 -- /opt/virtuoso-opensource/bin/isql 1111 dba "$VAULT_PW" \
+    exec="select count(*) from DB.DBA.SYS_USERS;"
 
 # Internal Service first — verify Virtuoso is healthy through it.
 # Apply only the `virtuoso` ClusterIP Service for now; the

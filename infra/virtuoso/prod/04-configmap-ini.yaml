@@ -1,15 +1,16 @@
-# virtuoso.ini — sized for the staging 2 GiB cgroup.
-#
-# When the new prod node arrives, edit NumberOfBuffers,
-# MaxCheckpointRemap, ServerThreads, and the StatefulSet pod
-# resources. Nothing else changes.
+# Prod virtuoso.ini. Same shape as staging post-incident-bumps —
+# 16 HTTP threads, 12 SQL threads, MaxConnections=40 — sized for
+# the 4 GiB cgroup. NumberOfBuffers stays at 180000 (1.5 GiB
+# pool); leave room to bump alongside memory once we know the
+# steady-state working set in prod.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: virtuoso-config
-  namespace: gmr
+  namespace: fontem-prod
   labels:
     app: virtuoso
+    gmr/environment: prod
 data:
   virtuoso.ini: |
     [Database]
@@ -50,11 +51,9 @@ data:
     MaxKeepAlives            = 10
     KeepAliveTimeout         = 10
     HTTPThreadSize           = 280000
-    # Bumped from 4 → 16 because a single-threaded sink at ~280 evt/s
-    # was saturating all SQL threads, leaving SPARQL read queries
-    # starved — /api/data-quality 504'd on the count(SanctionedEntity)
-    # call while a bulk replay was in flight. 16 lets a few reads
-    # land in parallel without slowing the writer.
+    # 16 HTTP threads — the staging incident showed 4 starves under
+    # a single-threaded sink at ~280 evt/s. 16 lets reads land
+    # alongside writes during bulk replay or steady ingestion.
     ServerThreads            = 16
 
     [SPARQL]

@@ -1,893 +1,519 @@
-# Migration: Neo4j → Virtuoso (RDF / OWL)
+# Migration: event-log-driven write architecture
 
-This is the master plan for replacing Fontem's storage layer. It's a
-multi-week, multi-phase project. Phase 0 is detailed because we
-can start it on day one. Phases 1+ are sketched — they'll be
-detailed once the preceding phase has landed and informed the next.
+> **Status**: in execution. This document is the single source of
+> truth for the migration; if you're picking up the work midway,
+> read top-to-bottom and you should know exactly where to resume.
+> The previous "Neo4j → Virtuoso (drop Neo4j entirely)" plan is
+> archived at [MIGRATION.archived.md](MIGRATION.archived.md) for
+> reference; the architecture below supersedes it.
 
-## Why we're moving
+## TL;DR
 
-Two architectural gaps in the current stack, both already surfaced
-as bugs:
+We are **not** removing Neo4j. We're moving from "two stores
+written by ETLs in lockstep" to "**one event log**, multiple
+projection stores".
 
-- **No reasoner.** Derived relationships (`CLIENT_OF`, `SUPPLIER_OF`,
-  transitive ownership) are hand-materialised by an ETL job and drift
-  silently when the underlying graph mutates. The eu-LISA incident
-  was this bug class. With OWL2-RL the property chain
-  `:awarded ∘ :awardedTo ⊑ :client` becomes a one-line declarative
-  axiom that the reasoner maintains.
-- **No federation.** Wikidata, OpenCorporates, EU Publications
-  Office, DBpedia all publish SPARQL endpoints. With our own SPARQL
-  endpoint, federated joins (`SERVICE <…>`) become first-class. With
-  Cypher they're hand-stitched HTTP joins.
+```
+                                ┌──────────────────────────┐
+                                │  Postgres (events ts)    │
+                                │  ┌────────────────────┐  │
+   ETL loaders ──emit──►        │  │ entity_events      │  │  ┌──────────────┐
+   (~30, refactored)            │  │ (BIGSERIAL seq, …) │  │  │  Sinks       │
+                                │  └────────────────────┘  │  │  (consumers, │
+   Consolidator ──emit──►       │  ┌────────────────────┐  │  │  per-store)  │
+   (SameAs, Merge,…)            │  │ consumer_offsets   │◄─┤  │              │
+                                │  └────────────────────┘  │  └──────────────┘
+                                │  ┌────────────────────┐  │   ▲          ▲
+                                │  │ dead_letter        │  │   │          │
+                                │  └────────────────────┘  │   │          │
+                                └──────────────────────────┘   │          │
+                                                               │          │
+                                       ┌───────────────────────┘          │
+                                       │                                  │
+                                ┌──────┴────────┐               ┌─────────┴──────┐
+                                │ Virtuoso sink │               │ Neo4j sink     │
+                                │ (batched      │               │ (Cypher MERGE  │
+                                │  PUT-replace) │               │  per event)    │
+                                └───────────────┘               └────────────────┘
+                                                                         ▲
+                                                                         │   reads
+                                                            ┌────────────┴────────┐
+                                                            │  Consolidator       │
+                                                            │  (consumer,         │
+                                                            │   high-watermark    │
+                                                            │   gated by Neo4j    │
+                                                            │   sink offset)      │
+                                                            │   emits SameAs /    │
+                                                            │   Merge / Flagged   │
+                                                            └─────────────────────┘
+```
 
-A third reason, less architectural but real: **multi-node Neo4j is
-paid**. Virtuoso Open Source ships clustering in the FOSS edition.
-We won't need it for years (single-node Virtuoso comfortably handles
-multi-billion-triple workloads), but the ceiling is higher.
+**Roles after migration:**
 
-## Constraints
+- **Postgres `events.entity_events`** — canonical event log. Source
+  of truth for what happened and when.
+- **Virtuoso** — projection. Owns properties, federation, public
+  SPARQL endpoint at `data.fontem.eu`, owl:sameAs equivalence
+  closure, ontology + SHACL.
+- **Neo4j** — projection. Owns graph traversal, GDS, fulltext
+  index, vector index. Internal-only. Single instance, community
+  license.
+- **Postgres `vectors.embeddings`** — projection for k-NN
+  similarity (already deployed in the postgres-fontem warm-up).
 
-The migration runs against these realities:
+Both stores are derivable from the event log; replay-from-zero is
+a hard requirement we test in Phase F.
 
-- **Single 32GB / 12c+20HT / 4TB SSD prod node.** Fontem's full
-  prod stack lives here.
-- **Memory budget** (firm):
-  - Virtuoso: 20 GB
-  - Postgres (reports + fontem-stats + pgvector sidecar): 4 GB
-  - APIs (gmr-api, gmr-community-api, gmr-web SSR, claude-proxy): 4 GB
-  - OS / page cache / headroom: 4 GB
-- **ETL on the dev node.** Bulk loads, the consolidator's batch
-  rules, and the weekly Wikidata refresh run on the dev node and
-  write to prod Virtuoso over the cluster network. Prod node never
-  pays the ETL CPU cost.
-- **We're in staging, the data is throwaway.** Iterate fast. We
-  don't need a parallel-write / shadow-compare phase for data
-  fidelity — we'll re-run the loaders against Virtuoso from scratch.
-- **pgvector for embeddings.** LaBSE embeddings move out of Neo4j
-  (where they live as float arrays on Authority nodes) into a
-  pgvector table in the existing Postgres deployment. IRIs become
-  the foreign key.
+## Why this shape
 
-## What stays where
+We considered three architectures:
 
-Not everything moves to RDF. Right-tool-for-the-job:
+| Approach | Decision |
+|---|---|
+| Pure derived (Virtuoso canonical, periodic Neo4j refresh) | **Rejected** — bridge job becomes critical path. Drift window between an ETL succeeding on Virtuoso and Neo4j catching up causes the consolidator to miss duplicates. |
+| Dual-write + idempotent reconciliation | **Rejected** — stores write each other. Drift detection is heavy (timestamp scans). Adding a third store later means rewriting all ETLs. |
+| **Event-log + per-store sinks** | **Selected.** Each store is a projection of the same log. Failures isolate cleanly. Adding a store later is "add a sink, replay from offset 0". Audit is the queue. |
 
-| Data | Store | Why |
+The trade-off we accept: ~10–12 days of upfront work for a
+cleaner long-term shape. We're pre-prod, so the time for deep
+rewrites is now.
+
+## Where Neo4j stays useful
+
+| Capability | Why Neo4j wins | Used by |
 |---|---|---|
-| Procurement, GLEIF, EDGAR, ESEF, sanctions, lobbying, persons | **Virtuoso** | Graph-shaped, needs reasoning, federation |
-| LaBSE embeddings | **Postgres + pgvector** | Vector similarity isn't RDF's job |
-| Reports (TipTap docs) | **Postgres** | Document blobs, no graph value |
-| Atlas / fontem-stats observations | **Postgres** | Tabular `(region × indicator × year × value)` — RDF would 10× the storage for no gain |
-| Conversation history (assistant) | **Postgres** | Append-only per-user log, not a graph |
-| Search indexes | **Virtuoso FTS** + **pgvector** | `bif:contains` for exact / fuzzy text; pgvector for cross-language semantic |
-
-## Target architecture
-
-```
-        ┌──────────────────────────┐
-        │  ETL jobs (dev node)     │
-        │  - load_eu_sanctions     │
-        │  - load_ted_contracts    │
-        │  - load_gleif            │
-        │  - …                     │
-        │  - wikidata_weekly_sync  │
-        └────────────┬─────────────┘
-                     │ SPARQL UPDATE
-                     │ (ISQL bulk-load for full reloads)
-                     ▼
-   ┌─────────────────────────────────────────────────┐
-   │  Virtuoso OS — 20 GB, prod node                 │
-   │                                                 │
-   │  Named graphs:                                  │
-   │    <http://data.fontem.eu/ontology>             │
-   │    <http://data.fontem.eu/data>                 │
-   │    <http://wikidata.org/entity>                 │  ← weekly truthy mirror
-   │    <http://linkedopendata.eu/entity>            │  ← EUKG (Kohesio) mirror
-   │    <http://dbpedia.org/resource>                │  ← optional, future
-   │                                                 │
-   │  Reasoning: OWL2-RL forward-chained, materialised│
-   │  Indexes: full SPARQL + bif:contains FTS        │
-   └────────────────────┬────────────────────────────┘
-                        │ SPARQL SELECT
-        ┌───────────────┴─────────────────┐
-        │       APIs (4 GB shared)        │
-        │   gmr-api │ gmr-community-api   │
-        │   gmr-web SSR │ claude-proxy    │
-        └─────────────────────────────────┘
-
-        Sidecar (no graph involvement):
-   ┌────────────────────────────────────────┐
-   │  Postgres — 4 GB, prod node            │
-   │   - schema: reports                    │
-   │   - schema: fontem_stats (atlas)       │
-   │   - schema: vectors (pgvector)         │
-   │     embeddings (entity_iri, vec(768))  │
-   │   - schema: assistant (conversations)  │
-   └────────────────────────────────────────┘
-```
-
-## Phases at a glance
-
-| Phase | Goal | Effort (solo) | Detail level |
-|---|---|---|---|
-| **0** — Design | Ontology in Turtle, URI scheme, Wikidata alignment, decision docs | 1–2 weeks | **Detailed below** |
-| **1** — Infrastructure | Virtuoso Helm chart, pgvector schema, backups | 1 week | Sketched |
-| **2** — Pilot ETL: sanctions | One source, end-to-end, validate everything | 1 week | Sketched |
-| **3** — Wikidata mirror | Bulk-load truthy, weekly refresh, federated query patterns | 1 week | Sketched |
-| **4** — Remaining ETLs | Port each loader to write Turtle / SPARQL | 3–4 weeks | Sketched |
-| **5** — Read API cutover | Every Cypher → SPARQL; feature-flagged endpoint switch | 2 weeks | Sketched |
-| **6** — Reasoner activation | Property chains, sameAs, derived classes; delete materialise ETL | 1 week | Sketched |
-| **7** — Decommission | Remove Neo4j from cluster, codebase, docs | 1 week | Sketched |
-
-**Total realistic budget: 10-12 weeks elapsed for one focused engineer.**
-Two engineers can roughly halve it; phases 1, 4, and 5 parallelise.
-
----
-
-# Phase 0 — Design
-
-The single highest-leverage phase. Everything downstream pivots on
-the decisions made here, and getting them wrong gets discovered three
-phases later when porting is half done. Spend the time.
-
-Phase 0 produces four artefacts, all in this repo:
-
-1. **URI scheme** (`ontology/uri-scheme.md`) — how every entity, class,
-   and property is named.
-2. **Wikidata alignment** (`ontology/wikidata-alignment.md`) — which
-   Fontem classes / properties are `owl:equivalentClass` /
-   `owl:equivalentProperty` to existing Wikidata terms.
-3. **Turtle ontology** (`ontology/*.ttl`) — the actual TBox.
-4. **SHACL shapes** (`shapes/*.shacl.ttl`) — write-time validation.
-
-## 0.1 URI scheme
-
-Decisions to make and pin:
-
-- **Base IRI** — proposed: `http://data.fontem.eu/`
-  - `…/id/{ClassName}/{stable_id}` for entities
-  - `…/ontology#{TermName}` for the TBox (classes, properties)
-  - `…/graph/{name}` for named graphs
-- **Stable ID strategy.** Companies use `gmr_id` (UUID5), Authorities
-  use `authority_id` (UUID5). Migration: keep the same UUIDs, slot
-  them into the `…/id/Authority/{uuid}` IRI form. Existing IDs are
-  stable and externally referenced — don't re-mint.
-- **Trailing slash convention** — entities end without slash
-  (`…/Authority/foo`), properties with `#` (`…/ontology#hasContract`).
-  Standard pattern, no surprises.
-- **Hash vs slash** for the ontology — `#`-namespaced. Smaller
-  Vocabulary. Easier to dereference single terms.
-
-Output: `ontology/uri-scheme.md` with the full decision and examples
-for every entity type currently in Neo4j.
-
-## 0.2 Wikidata alignment
-
-For every Fontem class and property, decide:
-
-1. Is there an equivalent Wikidata class / property? If yes, use
-   `owl:equivalentClass` / `rdfs:subClassOf` / `owl:equivalentProperty`
-   to map.
-2. If no but a parent class exists, use `rdfs:subClassOf` to align
-   with the closest Wikidata supertype.
-3. If neither, mint our own (it's our ontology — no shame).
-
-Examples to seed the table:
-
-| Fontem term | Wikidata equivalent | Relation |
-|---|---|---|
-| `fontem:Authority` (contracting authority) | `wd:Q327333` (gov agency), `wd:Q43229` (organization) | `rdfs:subClassOf wd:Q327333` |
-| `fontem:Company` | `wd:Q4830453` (business), `wd:Q43229` | `rdfs:subClassOf wd:Q4830453` |
-| `fontem:Contract` | `wd:Q2334719` (contract) | `rdfs:subClassOf` |
-| `fontem:Lobbyist` | `wd:Q353808` (lobbyist) | `rdfs:subClassOf` |
-| `fontem:Person` | `wd:Q5` (human) | `rdfs:subClassOf` |
-| `fontem:hasLEI` | `wdt:P1278` (Legal Entity Identifier) | `owl:equivalentProperty` |
-| `fontem:hasCountry` | `wdt:P17` (country) | `owl:equivalentProperty` |
-| `fontem:hasName` | `rdfs:label` | use `rdfs:label` directly |
-| `fontem:tickerSymbol` | `wdt:P249` | `owl:equivalentProperty` |
-
-Where it makes sense, **use the Wikidata IRI directly** instead of
-minting our own — `wdt:P17` for country, `rdfs:label` for names. The
-goal: queries from Fontem against Wikidata work without translation,
-and queries from outside Fontem against our endpoint feel familiar
-to anyone who's used Wikidata.
-
-Output: `ontology/wikidata-alignment.md` with the full table and
-notes per term.
-
-## 0.3 Class hierarchy + properties (Turtle)
-
-The actual TBox. Five files, organised by domain:
-
-### `ontology/core.ttl`
-
-Top of the hierarchy. The classes everything else extends.
-
-```turtle
-fontem:Agent             rdf:type owl:Class .              # parent of Person, Organisation
-fontem:Organisation      rdfs:subClassOf fontem:Agent .
-fontem:Person            rdfs:subClassOf fontem:Agent ;
-                         rdfs:subClassOf wd:Q5 .
-fontem:Document          rdf:type owl:Class .              # parent of Contract, Report
-fontem:GeographicEntity  rdf:type owl:Class .              # parent of NUTS regions, countries
-fontem:hasName           rdfs:subPropertyOf rdfs:label .
-fontem:hasCountry        owl:equivalentProperty wdt:P17 .
-fontem:hasIdentifier     rdf:type owl:DatatypeProperty .
-```
-
-### `ontology/procurement.ttl`
-
-The TED domain. **The property chain that makes the eu-LISA bug
-class disappear**:
-
-```turtle
-fontem:Authority         rdfs:subClassOf fontem:Organisation ;
-                         rdfs:subClassOf wd:Q327333 .
-fontem:Contract          rdfs:subClassOf fontem:Document ;
-                         rdfs:subClassOf wd:Q2334719 .
-
-fontem:awarded           rdfs:domain fontem:Authority ;
-                         rdfs:range  fontem:Contract .
-fontem:awardedTo         rdfs:domain fontem:Contract ;
-                         rdfs:range  fontem:Company .
-
-# THE LINE THAT FIXES THE WHOLE BUG CLASS
-fontem:client            owl:propertyChainAxiom (
-                           fontem:awarded
-                           fontem:awardedTo
-                         ) .
-fontem:supplier          owl:inverseOf fontem:client .
-```
-
-That `owl:propertyChainAxiom` is the entire CLIENT_OF /
-SUPPLIER_OF subsystem, declaratively. The reasoner materialises it on
-load. We delete `materialize_trade_edges.py` and the consolidator's
-`_refresh_trade_edges` helper.
-
-### `ontology/corporate.ttl`
-
-Companies, listings, ownership.
-
-```turtle
-fontem:Company           rdfs:subClassOf fontem:Organisation ;
-                         rdfs:subClassOf wd:Q4830453 .
-fontem:Listing           rdfs:subClassOf fontem:Document .
-fontem:hasLEI            owl:equivalentProperty wdt:P1278 .
-fontem:tickerSymbol      owl:equivalentProperty wdt:P249 .
-fontem:listedAs          rdfs:domain fontem:Company ;
-                         rdfs:range  fontem:Listing .
-fontem:owns              owl:TransitiveProperty .   # transitive ownership chains
-```
-
-### `ontology/lobbying.ttl`, `ontology/sanctions.ttl`
-
-Smaller; populate after the bigger files settle.
-
-### `ontology/meta.ttl`
-
-Provenance + change tracking. Use **PROV-O** (W3C standard) — every
-triple of consequence has provenance:
-
-```turtle
-fontem:DataSource        rdfs:subClassOf prov:Entity .
-fontem:LoadEvent         rdfs:subClassOf prov:Activity .
-# Each ETL run logs (sourceTriples, derivationTime, sourceURL)
-```
-
-This *replaces* the current `:DataSource` Neo4j marker — we get
-provenance graphs for free.
-
-## 0.4 SHACL shapes (write-time validation)
-
-SHACL is to RDF what JSON Schema is to JSON: assert constraints,
-validate writes. Don't skip this — it's how the ETL catches
-malformed data before it hits the reasoner.
-
-Minimum starting set:
-
-```turtle
-fontem-shapes:CompanyShape
-    a sh:NodeShape ;
-    sh:targetClass fontem:Company ;
-    sh:property [
-        sh:path fontem:hasLEI ;
-        sh:datatype xsd:string ;
-        sh:pattern  "^[A-Z0-9]{18}[0-9]{2}$" ;     # ISO 17442 LEI format
-        sh:minCount 0 ; sh:maxCount 1 ;
-    ] ;
-    sh:property [
-        sh:path fontem:hasCountry ;
-        sh:datatype xsd:string ;
-        sh:pattern  "^[A-Z]{3}$" ;                 # ISO 3166-1 alpha-3
-    ] .
-```
-
-Every ETL writer runs the data through `pyshacl` (or Virtuoso's
-built-in SHACL endpoint) before commit. The current "in-cypher
-defensive guards" pattern (e.g. the sanctions matcher's `MIN_NAME_LEN`)
-becomes a SHACL constraint — declarative, reusable, test-friendly.
-
-## 0.5 Mapping table: Neo4j → RDF
-
-For every existing Neo4j label and relationship type, a one-line
-mapping. This is what the ETL writers consume. Lives in
-`ontology/neo4j-mapping.md` (created during Phase 0).
-
-Sketch (will be expanded):
-
-```
-Neo4j label        RDF class
------------------  -----------------------------
-Company            fontem:Company
-Authority          fontem:Authority
-Contract           fontem:Contract
-Person             fontem:Person
-Lobbyist           fontem:Lobbyist
-Listing            fontem:Listing
-CPV                fontem:CPVCategory
-SanctionedEntity   fontem:SanctionedEntity
-
-Neo4j rel          RDF property
------------------  -----------------------------
-:AWARDED           fontem:awarded
-:AWARDED_TO        fontem:awardedTo
-:CATEGORIZED_AS    fontem:hasCategory
-:LISTED_AS         fontem:listedAs
-:CLIENT_OF         (DERIVED — reasoner materialises)
-:SUPPLIER_OF       (DERIVED — owl:inverseOf fontem:client)
-:SAME_AS (review)  fontem:proposedSameAs (custom — review queue)
-:SAME_AS (approved)owl:sameAs
-:SANCTIONED        fontem:sanctionedBy
-:LOBBIES_FOR       fontem:lobbiesFor
-:REPORTED          (becomes prov:wasDerivedFrom in meta graph)
-```
-
-Key calls:
-
-- **CLIENT_OF / SUPPLIER_OF do not exist as stored properties.** They
-  are derived via OWL property chains. Queries that today read
-  `(:Authority)-[r:CLIENT_OF]->(:Company) RETURN r.contracts`
-  become `… ?contract … COUNT(?contract)` SPARQL queries. The count
-  is computed at query time off the underlying contracts.
-- **SAME_AS bifurcates.** The consolidator's review queue (proposed
-  merges awaiting human approval) is a custom predicate
-  (`fontem:proposedSameAs`) so the reasoner doesn't mistakenly treat
-  unreviewed candidates as equivalences. On approval, the reviewer's
-  action rewrites `fontem:proposedSameAs` → `owl:sameAs`, the
-  reasoner kicks in, and the equivalence is materialised.
-- **REPORTED edges** (audit trail of who said what) become a PROV-O
-  meta graph, not first-class triples. Saves billions of triples in
-  the main graph and gives us proper provenance semantics.
-
-## 0.6 Pilot scope decision
-
-Sanctions is the pilot source. Reasons:
-
-- Smallest dataset (~3K entities, ~50K triples after enrichment).
-- Simple shape: `SanctionedEntity` + designation date + jurisdiction
-  + alias list.
-- Existing test suite (`test_load_eu_sanctions.py`) validates the
-  shape, useful for regression-testing the SPARQL writer.
-- Defamation-class consequences if data is wrong, so the testing
-  bar is already high in the existing pipeline.
-
-If the pilot works end-to-end (ETL writes → Virtuoso → reasoner runs
-→ SPARQL query → API → UI displays correctly), every other source
-is a known-shape repeat.
-
-## 0.7 What Phase 0 outputs
-
-By end of Phase 0 we have:
-
-- [x] This `MIGRATION.md`
-- [ ] `ontology/uri-scheme.md`
-- [ ] `ontology/wikidata-alignment.md`
-- [ ] `ontology/core.ttl` (skeleton)
-- [ ] `ontology/procurement.ttl` (with the property-chain axiom)
-- [ ] `ontology/corporate.ttl`
-- [ ] `ontology/lobbying.ttl`
-- [ ] `ontology/sanctions.ttl`
-- [ ] `ontology/meta.ttl`
-- [ ] `ontology/neo4j-mapping.md`
-- [ ] `shapes/sanctions.shacl.ttl` (pilot-scoped; others later)
-- [ ] One end-to-end smoke: load a hand-crafted Turtle file into a
-      throwaway Virtuoso (Docker on dev node), run a SPARQL query
-      that exercises the property chain, watch the reasoner produce
-      the inferred triple. **This is the proof point that the
-      design works before we touch any production code.**
-
-Until that smoke fires, Phase 1 doesn't start.
-
----
-
-# Phase 1 — Infrastructure (detailed, staging-sized)
-
-Stand up real Virtuoso in the cluster. Substrate decision is locked
-(see `tools/smoke/COMPARISON.md`); this phase is mechanical infra
-work. ~1 week of effort.
-
-> **Staging vs prod scale.** This plan sizes Virtuoso for the
-> current staging deployment — single-node cluster, single Virtuoso
-> for all four logical environments (gmr, gmr-staging, gmr-dev,
-> gmr-dast), staging ETL data (a few months of TED, GLEIF, lobbying
-> snapshots — not the full historical load). Memory + storage
-> match the existing Neo4j footprint (2Gi req / 5Gi limit, 50Gi
-> data PV). When the new prod node arrives we re-tune up — the
-> ConfigMap is the only thing that changes.
-
-## 1.1 Helm chart for Virtuoso OS
-
-No first-party Helm chart exists; we write our own. Layout:
-
-```
-deployment/
-  Chart.yaml
-  values.yaml
-  templates/
-    statefulset.yaml      ← single replica, gmr namespace
-    pvc-data.yaml         ← claims virtuoso-data-pv (50Gi RWO, NFS)
-    pvc-backup.yaml       ← claims virtuoso-backup-pv (20Gi RWX, NFS)
-    configmap-ini.yaml    ← virtuoso.ini, see §1.2
-    secret-dba.yaml       ← Vault-issued `dba` password
-    certificate.yaml      ← cert-manager Certificate via vault-issuer
-    service.yaml          ← ClusterIP 8890 (HTTP/SPARQL) + 1111 (ISQL, internal)
-    cronjob-backup.yaml   ← daily `backup_online()` to /backup PVC
-```
-
-The existing `infra/fontem-data-placeholder.yaml` Service stays —
-its selector swaps from the placeholder pod to the Virtuoso pod
-on cutover. Bastion-side nginx config unchanged. NodePort 31457
-unchanged.
-
-## 1.2 `virtuoso.ini` tuning for staging (2 GiB cgroup)
-
-```ini
-[Parameters]
-NumberOfBuffers          = 180000    ; ~1.4 GiB working set (each = 8 KiB)
-MaxCheckpointRemap       = 45000     ; 25% of NumberOfBuffers
-DefaultIsolation         = 2         ; read committed
-MaxClientConnections     = 20
-ServerThreads            = 4
-IndexTreeMaps            = 256
-DirsAllowed              = ., /opt/virtuoso-opensource/share, /opt/virtuoso-opensource/vad, /import, /backup
-MaxQueryCostEstimationTime = 60
-MaxQueryExecutionTime      = 300
-
-[HTTPServer]
-ServerPort                 = 8890
-HTTPThreadSize             = 280000
-ServerThreads              = 4
-KeepAliveTimeout           = 10
-
-[SPARQL]
-DefaultGraph               = http://data.fontem.eu/graph/data
-ResultSetMaxRows           = 50000
-MaxQueryCostEstimationTime = 60
-MaxQueryExecutionTime      = 300
-```
-
-Pod resources: `requests: { cpu: 500m, memory: 1Gi }`,
-`limits: { cpu: 2, memory: 2Gi }`. The cluster is tight, so we
-hold a hard 2 GiB ceiling for now. Headroom inside the cgroup is
-~600 MiB above the buffer pool — enough for the (JVM-less)
-Virtuoso process + page cache, not much else. If we observe
-OOM-kills or query latency from buffer thrashing, raise the
-cgroup first; OOM-killing the database is a bad day.
-
-When the prod node arrives we update the ConfigMap to push
-NumberOfBuffers up (e.g. 2,500,000 ≈ 19 GiB) and bump the cgroup
-limit. No other change.
-
-## 1.3 Postgres pgvector sidecar
-
-Add to the existing Postgres deployment:
+| Property paths, shortest-path | First-class Cypher support; fast against an in-memory native graph | `gmr-api/graph.py`, public report builder |
+| GDS (Jaccard, WCC, betweenness) | Native graph algorithms with index-aware traversal | Consolidator's clustering rules |
+| Fulltext with Lucene scoring | Full-text index with proper relevance ranking | Resolver name-matching |
+| Vector index (k-NN cosine) | LaBSE embedding lookup for multilingual entity matching | `embedding_similarity_authority` rule |
+| `apoc.refactor.mergeNodes` | Merges duplicate nodes, rewrites all incident edges atomically | Consolidator merge step |
+
+Trying to do any of these in SPARQL is a redesign, not a port.
+Keeping them in Neo4j is the pragmatic call. Virtuoso gets
+`owl:sameAs` for cross-source equivalence (which it handles
+natively in OWL2-RL); the materialised merge stays a Neo4j
+operation.
+
+## Schema (Postgres)
+
+The event log lives in a dedicated `events` schema in `gmr_app`,
+on its own tablespace `events_ts` so it can be detached and
+replaced independently of the rest of the database.
 
 ```sql
-CREATE SCHEMA vectors;
-CREATE EXTENSION IF NOT EXISTS vector;
+-- One-time bootstrap (DBA / migration job):
+CREATE TABLESPACE events_ts LOCATION '/var/lib/postgresql/events';
+CREATE SCHEMA events;
+ALTER SCHEMA events OWNER TO postgres;
 
-CREATE TABLE vectors.embeddings (
-    entity_iri    text PRIMARY KEY,
-    embedding     vector(768) NOT NULL,
-    encoder_id    text NOT NULL,
-    updated_at    timestamptz NOT NULL DEFAULT now()
-);
+CREATE TABLE events.entity_events (
+    seq            BIGSERIAL PRIMARY KEY,
+    ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    event_type     TEXT NOT NULL,        -- 'UpsertCompany', 'AssertSameAs', …
+    schema_version INT  NOT NULL DEFAULT 1,
+    iri            TEXT NOT NULL,        -- canonical IRI
+    domain         TEXT NOT NULL,        -- 'company', 'contract', …
+    op             TEXT NOT NULL,        -- 'upsert' | 'delete' | 'control'
+    payload        JSONB NOT NULL,
+    batch_id       UUID,                 -- correlates events from one ETL run
+    producer       TEXT NOT NULL         -- 'load_eu_sanctions' | 'consolidator' | …
+) TABLESPACE events_ts;
 
-CREATE INDEX embeddings_hnsw_cosine ON vectors.embeddings
-USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX entity_events_domain_seq    ON events.entity_events (domain, seq) TABLESPACE events_ts;
+CREATE INDEX entity_events_iri_seq       ON events.entity_events (iri,    seq) TABLESPACE events_ts;
+CREATE INDEX entity_events_batch         ON events.entity_events (batch_id) TABLESPACE events_ts;
+
+CREATE TABLE events.consumer_offsets (
+    consumer_name TEXT PRIMARY KEY,
+    last_seq      BIGINT NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+) TABLESPACE events_ts;
+
+CREATE TABLE events.dead_letter (
+    seq             BIGINT NOT NULL,
+    consumer        TEXT NOT NULL,
+    error           TEXT NOT NULL,
+    attempts        INT NOT NULL,
+    first_failed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (seq, consumer)
+) TABLESPACE events_ts;
+
+CREATE INDEX dead_letter_consumer ON events.dead_letter (consumer) TABLESPACE events_ts;
 ```
 
-The `entity_iri` is the foreign key into Virtuoso. Application
-code reads/writes embeddings here, then queries Virtuoso to
-resolve the IRI to RDF triples.
+Concurrent consumers use `SELECT … FOR UPDATE SKIP LOCKED` on
+the cursor; offset writes commit in the same transaction as
+work, so a crash between work and ack causes a redo (at-least-once
+delivery) rather than a loss.
 
-## 1.4 Storage — NFS PVs (matching existing Neo4j pattern)
+## Event taxonomy
 
-Two statically provisioned NFS PVs, identical layout to the
-existing `neo4j-{data,backup}-pv`:
+**Entity events** — one per (entity-type, op):
 
-```yaml
-# pv/virtuoso-data-pv.yaml
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: virtuoso-data-pv
-spec:
-  accessModes: [ReadWriteOnce]
-  capacity: { storage: 50Gi }
-  persistentVolumeReclaimPolicy: Retain
-  nfs:
-    server: 10.44.0.6
-    path: /srv/nfs/virtuoso-data
----
-# pv/virtuoso-backup-pv.yaml
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: virtuoso-backup-pv
-spec:
-  accessModes: [ReadWriteMany]
-  capacity: { storage: 20Gi }
-  persistentVolumeReclaimPolicy: Retain
-  nfs:
-    server: 10.44.0.6
-    path: /srv/nfs/virtuoso-backup
+```
+UpsertCompany          DeleteCompany
+UpsertListing          DeleteListing
+UpsertContract         DeleteContract
+UpsertAuthority        DeleteAuthority
+UpsertCPV              DeleteCPV
+UpsertNUTSRegion       DeleteNUTSRegion
+UpsertLobbyist         DeleteLobbyist
+UpsertLobbyInterest    DeleteLobbyInterest
+UpsertCohesionProject  DeleteCohesionProject
+UpsertSanctionedEntity DeleteSanctionedEntity
+UpsertFiling           DeleteFiling
 ```
 
-Action: create the two NFS export directories on the NFS server
-side before applying the PVs. Same step we did for Neo4j's PVs.
+**Edge events** — emitted only when a relationship is independent
+of any single entity body (most of the time edges live as
+properties of one of the endpoints):
 
-## 1.5 Backup + restore drill
-
-- Daily 04:00 UTC CronJob: `EXEC = "backup_online (...)"` via
-  ISQL. Backup files land in `/backup` (the NFS-backed RWX PV).
-- Retention: keep 7 daily backups, prune older. Cron handles this
-  in-script.
-- No off-cluster mirror at this stage — staging data is
-  reproducible from upstream sources, and the NFS PV is on a
-  different host from the cluster node so single-host failure
-  doesn't lose both. Off-cluster S3/MinIO mirroring can land in
-  Phase 7 alongside the prod hardware bring-up.
-- **Restore drill before declaring Phase 1 done.** Spin a
-  throwaway second Virtuoso pod from the backup, run a known
-  query, validate the result matches a pre-recorded snapshot.
-  Documented runbook in `infra/runbooks/virtuoso-restore.md`.
-
-## 1.6 TLS posture (no in-cluster TLS for the data tier)
-
-Public traffic terminates TLS at the Scaleway bastion:
-`data.fontem.eu` → bastion nginx (TLS) → cluster NodePort 31457 →
-Virtuoso on port 8890 (HTTP). Unchanged from Phase 0.
-
-In-cluster traffic (ETL writers, consolidator, gmr-api → Virtuoso)
-runs plain HTTP on `http://virtuoso.gmr.svc.cluster.local:8890`.
-That matches the existing data-tier pattern: Neo4j and Postgres
-both have `linkerd.io/inject: disabled` and serve plain protocols
-internally. The cluster network is treated as trusted; no
-in-cluster TLS is load-bearing for the data tier.
-
-The first plan-iteration assumed cert-manager + the existing
-`vault-issuer` could mint an internal cert for
-`virtuoso.gmr.svc.cluster.local`. Verifying against the live PKI
-showed otherwise: the role `pki_int/sign/void42-internal` only
-permits `*.void42.internal` and `*.void42.net` SANs.
-`*.svc.cluster.local` would be rejected. Three ways out, in order
-of preference:
-
-1. **(picked) Skip in-cluster TLS for the data tier.** Match Neo4j.
-2. Opt Virtuoso into the linkerd mesh — automatic mTLS, no PKI
-   change. Out of scope for Phase 1; revisit if any in-cluster
-   client genuinely requires encrypted transport.
-3. Extend the PKI role to allow `*.svc.cluster.local`. One Vault
-   CLI command, but a policy decision that touches the whole
-   cluster's PKI shape — not the right call to make as a side
-   effect of standing up one service.
-
-## 1.7 Auth
-
-- SPARQL SELECT (path `/sparql`): **public**. We want federators
-  reaching us. Per-IP rate limit applied at the bastion.
-- SPARQL UPDATE (path `/sparql-auth`): basic auth, Vault-issued
-  password. Only ETL writers + the consolidator hold the credential.
-  Vault `database/static-roles/virtuoso-dba` rotates weekly; the
-  password lives in a Vault Static Secret synced to the
-  `virtuoso-dba` Secret in the gmr namespace via VSO (same pattern
-  the rest of the platform uses).
-- ISQL (port 1111): never exposed; ClusterIP only, in-cluster only.
-- Default `dba/dba` rotated to the Vault-issued value on first
-  start. Document this in the runbook.
-
-## 1.8 Reverse-tunnel routing (no change from Phase 0)
-
-The existing chain stays:
 ```
-public DNS data.fontem.eu → Scaleway bastion 51.159.141.141 → cluster
-NodePort 31457 → Service fontem-data → (was placeholder; now Virtuoso)
+AssertListedAs          RetractListedAs
+AssertSubsidiaryOf      RetractSubsidiaryOf
+AssertLocatedIn         RetractLocatedIn
+AssertSanctionedBy      RetractSanctionedBy
+AssertReportedBy        RetractReportedBy
+…
 ```
 
-The placeholder pod gets retired in Phase 1's last step. Cutover
-is a Service-selector swap; the IRI host stays resolvable
-throughout.
+**Consolidation events** — emitted by the consolidator after
+detection:
 
-## 1.9 Write-time hook pattern (replaces materialised-view drift)
+```
+AssertSameAs            RetractSameAs
+MergeRequested          MergeApplied
+EntityFlagged
+```
 
-The big design call inherited from Phase 0: Virtuoso doesn't
-implement `owl:propertyChainAxiom` from the TBox. The fix isn't
-"give up on the chain"; it's "write the chain at write time, not
-load time, and not query time".
+**Control events** — instruct sinks about boundary semantics:
 
-Same shape as `gmr-consolidator/src/consolidator/actions.py:
-_refresh_trade_edges` we shipped a couple of weeks ago. Generic
-pattern:
+```
+BeginGraphReplace   { graph_iri }
+EndGraphReplace     { graph_iri }
+```
+
+A loader that wants "replace this whole named graph" emits
+`BeginGraphReplace`, then the per-entity Upserts, then
+`EndGraphReplace`. The Virtuoso sink uses the bracket as PUT
+semantics; the Neo4j sink translates it to `DETACH DELETE` of
+all matching nodes followed by `MERGE` of the new ones,
+within a single transaction.
+
+## Schema versioning
+
+Each event type has a JSON Schema at:
+
+```
+gmr-event-schemas/
+  v1/
+    UpsertCompany.json
+    UpsertFiling.json
+    AssertSameAs.json
+    …
+  v2/                 # added when an event type gains a field
+    UpsertCompany.json
+```
+
+The `schema_version` column on every row pins which schema the
+payload conforms to. Sinks fail loudly on unknown versions —
+schema regressions don't silently corrupt projections.
+
+`gmr-event-schemas` is a Python package. Producers
+(`pip install gmr-event-schemas`) get typed payload
+constructors; consumers get validators. CI on the schemas repo
+runs example payloads through the validator on every commit so
+breaking changes can't merge.
+
+## Consumer chain (high-watermark gating)
+
+The consolidator depends on Neo4j freshness (it uses Neo4j's
+fulltext + vector indexes for matching). To prevent the
+consolidator running ahead of the Neo4j sink:
 
 ```python
-class WriteHook:
-    """Recomputes derived triples for an entity's neighbourhood
-    after a write. Idempotent: drop-and-rebuild on every call."""
-    def refresh_authority(self, conn, authority_iri: str) -> None:
-        conn.update(REFRESH_AUTHORITY_TRADE_EDGES, iri=authority_iri)
-
-REFRESH_AUTHORITY_TRADE_EDGES = """
-WITH <http://data.fontem.eu/graph/data>
-DELETE { ?auth fontem:client ?co . ?co fontem:supplier ?auth . }
-WHERE  { ?auth fontem:client ?co . FILTER (?auth = ?canonical) }
-;
-WITH <http://data.fontem.eu/graph/data>
-INSERT { ?canonical fontem:client ?co . ?co fontem:supplier ?canonical . }
-WHERE  {
-  ?canonical fontem:awarded ?ct .
-  ?ct fontem:awardedTo ?co .
-  FILTER (?canonical = ?iri)
-}
-"""
+class ConsolidatorConsumer(EventConsumer):
+    def fetch_window(self):
+        my_offset    = self.read_offset()
+        upstream     = self.read_offset("neo4j_sink")
+        return self.fetch(my_offset + 1, upstream)
 ```
 
-Each ETL writer + the consolidator's merge action calls the
-appropriate hook for the entity it just touched. **Localised** —
-only the affected node's trade pairs get recomputed, not the
-global graph. **Idempotent** — DELETE-before-INSERT, safe to re-run.
+The consolidator never processes seq > Neo4j sink's last_seq.
+This is a "high-watermark" pattern; documented as the standard
+way to chain consumers where order matters. No new broker
+primitive needed.
 
-Defence-in-depth nightly cron: full re-materialise of every
-derived predicate. Same shape as the existing
-`materialize_trade_edges` cron; we keep that pattern, retarget it
-at SPARQL.
+## Sink design
 
-## 1.10 Monitoring
+Both sinks share a `EventConsumer` base class providing:
+poll loop, offset tracking, retry+DLQ, batch handoff,
+Prometheus instrumentation, Uptime Kuma heartbeat.
 
-- Prometheus exporter for Virtuoso (community one exists). Scrape
-  `/sparql-stats`.
-- Dashboards (Grafana):
-  - Query latency p50/p95/p99
-  - Buffer-pool hit rate (target > 95%)
-  - Reasoner materialisation time per ETL run
-  - Disk usage on `/database` and `/backup` PVCs
-  - SPARQL endpoint error rate (4xx/5xx)
-- Kuma push from the daily backup cron (matches the existing
-  `etl-trade-edges` cronjob's pattern).
+**Virtuoso sink** — batches by `(domain, batch_id)`. When the
+batch closes (different `batch_id` observed, or N seconds idle),
+serialise to Turtle and PUT to the per-domain named graph.
+PUT-replace semantics are preserved via the
+`BeginGraphReplace` / `EndGraphReplace` bracket. Per-entity
+events outside a bracket (e.g. consolidator outputs) flush as
+small bursts via SPARQL UPDATE.
 
-## 1.11 Phase 1 → Phase 2 hand-off
+**Neo4j sink** — per-event Cypher `MERGE`, batched in 1000-row
+`UNWIND`s within a single transaction. `BeginGraphReplace` /
+`EndGraphReplace` translate to `DETACH DELETE … MATCH n:Label
+WHERE …` followed by the inserts.
 
-Phase 1 closes when:
+Both run as Kubernetes Deployments (long-lived poll loop, not
+CronJobs) with HPA disabled (single replica per sink for
+ordering guarantees).
 
-- [ ] Virtuoso pod up, healthy, reachable at `https://data.fontem.eu/sparql`.
-- [ ] `dba` password rotated to a Vault-issued value.
-- [ ] Phase 0 ontology TBox loaded into `<…/graph/ontology>`.
-- [ ] Smoke fixture loaded into `<…/graph/data>`; the four
-  Phase 0 verification queries return the expected results
-  against the **production** Virtuoso (not just the smoke
-  Docker container).
-- [ ] Backup cron has produced at least one backup; restore
-  drill from that backup verified end-to-end.
-- [ ] pgvector schema in place; `embeddings` table writable.
-- [ ] Monitoring dashboards show non-zero data.
+## Observability (existing stack)
 
-When all of those are checked, Phase 2 (sanctions ETL pilot)
-starts.
+| Signal | Source | Stack |
+|---|---|---|
+| Per-consumer `event_lag_seconds` | Sink + consolidator | Prometheus → Grafana |
+| `events_processed_total`, `events_failed_total` | Sink + consolidator | Prometheus |
+| `dlq_size{consumer}` | Postgres `events.dead_letter` | Custom exporter (small) |
+| `batch_size_p50/p95` | Sink | Prometheus histogram |
+| Per-consumer heartbeat | Sink + consolidator | Uptime Kuma push |
+| Per-consumer logs | Sink + consolidator | stdout → Loki (Phase G) |
 
-# Phase 2 — Pilot ETL: sanctions (sketched)
+Grafana dashboard per consumer plus one cross-consumer "queue
+health" overview (lag heatmap, DLQ size over time, throughput).
 
-End-to-end on the smallest source.
+PrometheusRule alerts:
 
-- Add `RdfSanctionsSink` to gmr-consolidator (writes to Virtuoso via
-  `rdflib` + SPARQL UPDATE, or ISQL bulk-load for full reloads).
-- Port `load_eu_sanctions.py` to write Turtle for one ETL run,
-  validate against the SHACL shapes, push to Virtuoso.
-- Verify: the reasoner fires, sanctions show up in the right named
-  graph, queries return them.
-- Add an integration test that loads a fixture, runs a SPARQL query,
-  asserts on the result. This is the reusable shape every subsequent
-  source follows.
+- `EventSinkDown` — heartbeat absent >5m
+- `EventLagHigh` — lag_seconds > 600s for 15m
+- `DLQGrowing` — dlq_size delta > 0 for 30m
+- `EventBacklog` — events table grew but consumer didn't advance
 
-The validation criterion isn't "the data loaded" — it's "the data
-loaded AND a property chain inference fires AND the SHACL validator
-caught at least one synthetic bad-row injection."
+## Repo layout
 
-# Phase 3 — External knowledge graph mirrors (sketched)
+| Repo | Purpose | Status |
+|---|---|---|
+| **gmr-event-schemas** | JSON Schema definitions for every event type; published as Python package | new (Phase A) |
+| **gmr-events** | Shared client lib: `EventLog.emit()`, `EventConsumer` base, observability helpers | new (Phase A) |
+| **gmr-virtuoso-sink** | Sink runtime (Python long-poll, Deployment) | new (Phase B) |
+| **gmr-neo4j-sink** | Sink runtime (Python long-poll, Deployment) | new (Phase C) |
+| **edgar-gmr-etl** | All loaders refactored to `EventLog.emit()`; `RdfFilingsWriter`/`RdfSanctionsWriter` retired | refactor across Phase E |
+| **gmr-consolidator** | Refactored as event consumer + producer | refactor in Phase D |
+| **fontem-ontology** | This document; ontology + shapes unchanged | this PR |
+| **gitops** | New Deployments, Postgres tablespace + schema migration | rolling per phase |
 
-Two named graphs, same dump-load cron pattern, separate operational
-schedules.
+## Phases & deliverables
 
-**Wikidata mirror** (named graph `<http://wikidata.org/entity>`):
-- One-shot bulk-load of the `latest-truthy.nt.bz2` dump (~50 GB
-  compressed, ~500 GB loaded). Expect 12-24 hours wall clock, run on
-  the dev node, write to prod over the network with `ld_dir_all`.
-- Cron weekly: download new dump, load into a side graph, atomic
-  `MOVE GRAPH` to swap the alias when load succeeds, drop the old
-  side graph.
-- Canonical federated patterns to document:
-  - "Enrich a Fontem Authority with Wikidata's biographical fields"
-  - "Find Wikidata entities that match a Fontem Company by LEI"
-  - "Cross-language label resolution via Wikidata's `rdfs:label`"
-- Smoke: run the `eu-LISA` round-trip — fetch the Fontem authority
-  IRI, federate against Wikidata to retrieve its founding date and
-  director list, render in the UI.
+Each phase is one or more PRs. Phase boundaries are gates: do
+not start the next phase until the previous phase's gate passes.
 
-**EUKG / Kohesio mirror** (named graph `<http://linkedopendata.eu/entity>`):
-- Until this lands, Phases 2 / 4 / 5 use live federation against
-  `https://query.linkedopendata.eu/sparql` for any cohesion-project
-  details we don't carry locally. Sub-second latency typical, but
-  remote-dependent.
-- Same cron mechanics as Wikidata. The dump is much smaller (~1.83M
-  entities + supporting triples, expect a couple of GB compressed),
-  so the load completes in under an hour.
-- Once the mirror lands, the federation pattern moves to a local
-  cross-graph join (sub-100 ms instead of 1-3 s).
-- The bridge from our entities is `owl:sameAs <http://linkedopendata.eu/entity/Q…>`
-  emitted by the existing `wikibase_qid` field in the cohesion
-  loader (see Phase 2 / WS4 — no new ETL needed).
+### Phase A — Foundation
 
-# Phase 4 — Remaining ETLs (sketched)
+**Deliverables:**
+- Postgres `events_ts` tablespace and `events.*` schema (PVC,
+  mount, migration job)
+- `gmr-event-schemas` repo published with the starter taxonomy
+  above; CI validates example payloads
+- `gmr-events` Python lib: `EventLog.emit_*()`, `EventConsumer`
+  base class, idempotency-key support, JSON Schema validation,
+  Prometheus + Kuma helpers
+- Unit tests against an ephemeral Postgres
 
-In ascending complexity:
+**Gate:** ETL produces an event in test → consumer base class
+ingests, advances offset, retries on simulated failure, lands
+in DLQ on permanent failure, emits Prometheus metrics. Validated
+by an integration test in `gmr-events`.
 
-1. CDP, NUTS, FIRDS, OpenFIGI (no entity resolution, simple shape)
-2. GLEIF (entity resolution, but well-defined LEIs)
-3. Authorities + lobbying (multilingual, fuzzy matching — needs the
-   pgvector sidecar)
-4. TED contracts (largest, most relations — also the test for the
-   property chain reasoner under realistic load)
-5. Companies (largest write volume — final stress test)
+**Estimate:** 1.5 days.
 
-Each loader: write Turtle, validate against SHACL, push via SPARQL
-UPDATE. Existing unit tests for ETL shapes mostly transfer (we're
-testing the same input → output relationship, just with a different
-target store).
+### Phase B — Virtuoso sink end-to-end
 
-The consolidator changes meaningfully here:
-- Embedding similarity moves to pgvector (already in Phase 1 infra).
-- `apoc.refactor.mergeNodes` is replaced by either:
-  - "assert `owl:sameAs`, let the reasoner handle equivalence" (clean,
-    matches RDF semantics, but every query must traverse `owl:sameAs`
-    which costs at scale), OR
-  - "rewrite all triples from URI A to URI B, delete A" (analog of
-    physical merge — same write semantics as today, easier to query)
-- We pick during Phase 4 design, informed by reasoner cost
-  measurements from Phase 2's pilot.
+**Deliverables:**
+- `gmr-virtuoso-sink` Deployment with `(domain, batch_id)` batching
+- `BeginGraphReplace`/`EndGraphReplace` semantics translated
+  to PUT-replace on the corresponding named graph
+- Refactor `load_eu_sanctions` to emit events via the
+  `gmr-events` lib (no direct Virtuoso write any more)
+- Bootstrap: snapshot existing `…/graph/sanctions` state into
+  events table once, so the sink can replay-from-zero into a
+  clean Virtuoso and reproduce today's data
+- Grafana dashboard, PrometheusRule alerts, Kuma push
 
-# Phase 5 — Read API cutover (sketched)
+**Gate:** sanctions ETL emits → Virtuoso sink projects → public
+`/api/data-quality/sanctions` returns the same body as before.
+Replay test: drop the sanctions named graph, reset the sink's
+offset to 0, watch the graph rebuild bit-identical.
 
-Inventory: ~15 endpoints in `edgar-gmr-etl/src/api/routers/` and
-~10 in `gmr-community-api/src/api/routers/`.
+**Estimate:** 1.5 days.
 
-For each:
-- Write a SPARQL implementation alongside the Cypher one.
-- Feature-flag the choice via env var.
-- Validate with a shadow-comparison test: same input → same shape
-  out (modulo ordering).
-- Flip the flag. If anything looks wrong, flip back.
+### Phase C — Neo4j sink
 
-The hard ones (allow extra time):
-- `GET /graph/{id}` (the explorer): variable-depth traversal with
-  edge attribute return. SPARQL property paths handle most of it,
-  but the response shape (nodes + edges with attributes) needs
-  rewriting from "Cypher path objects" to "explicit triple
-  bindings".
-- `GET /search` (unified search): currently uses Neo4j fulltext
-  indexes. Becomes a `bif:contains` SPARQL query in Virtuoso, with
-  a parallel pgvector lookup for semantic similarity, results
-  merged by score.
-- The assistant's MCP tools (`investigate_entity`, `find_paths`,
-  `search_entities`): tool surface to the model stays the same;
-  the implementation behind each is rewritten in SPARQL.
+**Deliverables:**
+- `gmr-neo4j-sink` Deployment, mirror shape of Virtuoso sink
+  but using Cypher `UNWIND` + `MERGE`
+- `BeginGraphReplace` → `DETACH DELETE` of all nodes with the
+  matching label, then upserts
+- Same observability surface
 
-# Phase 6 — Reasoner activation (sketched)
+**Gate:** sanctions Cypher view in Neo4j matches Virtuoso content
+after both sinks have caught up. Replay test mirroring Phase B.
 
-Up to this point the property chain axioms are *defined* in the
-TBox but not yet *enabled* — the materialise ETL is still running
-in parallel. Phase 6 is the cutover:
+**Estimate:** 0.5 day.
 
-- Enable the OWL2-RL reasoner on the data graph.
-- Wait for materialisation (could be hours on full data).
-- Run shadow queries: the inferred `:client` triples should match
-  the materialised `CLIENT_OF` edges from `materialize_trade_edges`,
-  modulo any drift bugs in the latter.
-- Once parity is confirmed:
-  - Delete `materialize_trade_edges.py` and its CronJob.
-  - Delete `_refresh_trade_edges` from gmr-consolidator's
-    `actions.py`.
-  - Delete the smoke test `CONSOLIDATION-1` (it asserts a now-
-    impossible failure mode — the reasoner can't go stale).
-- The eu-LISA bug class is structurally impossible from this point.
+### Phase D — Consolidator as consumer
 
-# Phase 7 — Decommission Neo4j (sketched)
+**Deliverables:**
+- Consolidator refactored to consume from `entity_events` with
+  high-watermark gating against `neo4j_sink`
+- Detection rules read entities from the event stream rather
+  than polling Neo4j for "new since last run"
+- Outputs (`AssertSameAs`, `MergeRequested`, `Flagged`) emitted
+  back into the event log via `EventLog.emit()`; sinks pick them
+  up as they pick up everything else
+- Existing Neo4j-side `apoc.refactor.mergeNodes`, GDS, fulltext,
+  and vector index calls stay — but they're now triggered by
+  events rather than DB polling
 
-- Remove the Neo4j Helm release from gitops.
-- Remove Neo4j client deps + Cypher from every repo.
-- Reclaim the storage.
-- Remove the `kubectl get pods -n gmr -l app=neo4j` from runbooks.
-- Update `MIGRATION.md` history section: "Phase 7 completed YYYY-MM-DD".
+**Gate:** sanctions ETL emits a new entity → Neo4j sink commits
+→ consolidator consumes within watermark → emits an
+`AssertSameAs` for a real-world prior known-duplicate fixture →
+both sinks observe the equivalence. End-to-end test in CI.
 
-# Phase 0 finding — Virtuoso doesn't do property chains
+**Estimate:** 2 days. The hardest individual lift; gets its own
+sub-design doc as a follow-up issue.
 
-**Surfaced during WS6**, kept here for visibility.
+### Phase E — ETL fleet refactor
 
-The migration plan rests on the reasoner materialising
-`fontem:client owl:propertyChainAxiom (fontem:awarded
-fontem:awardedTo)` automatically. Virtuoso 7's inference engine
-covers RDFS + a useful OWL2 subset (subClassOf, subPropertyOf,
-inverseOf, TransitiveProperty, sameAs, equivalentClass /
-equivalentProperty) but **NOT property-chain axioms**. The chain
-declaration in `procurement.ttl` is therefore a no-op on Virtuoso.
+**Deliverables:** every loader migrated to `EventLog.emit()` —
+one PR per loader, mostly mechanical:
 
-The smoke test ships with a workaround: a SPARQL `INSERT … WHERE`
-post-load step (`tools/smoke/post-load.sparql`) materialises the
-chain explicitly. This produces correct triples but has the same
-shape as `materialize_trade_edges` did in the Neo4j era — just in
-SPARQL instead of Cypher. **Same materialised-view drift risk
-the migration was supposed to retire.**
+- load_us_companies
+- load_eu_listings (Listings + financials, both halves)
+- load_us_financials
+- load_ted_contracts
+- load_gleif
+- load_gleif_relationships
+- load_eu_lobbying
+- load_nuts
+- load_cpv
+- load_cdp
+- load_firds
+- load_openfigi
+- load_eu_knowledge_graph
+- materialize_trade_edges
+- load_eu_sanctions (already in Phase B)
 
-Three options to discuss before Phase 4 starts (when the chain
-is ETL-side rather than smoke-side):
+After this phase, `RdfFilingsWriter`, `RdfSanctionsWriter`, and
+the legacy in-loader Cypher `MERGE` blocks are deleted.
 
-1. **Stay on Virtuoso, run a post-load INSERT** as a scheduled
-   step. Simpler ops; centralised in one SPARQL file. The drift
-   risk is bounded by however often the cron runs.
-2. **Stay on Virtuoso, do query-time CONSTRUCT** instead of
-   materialising. Every query that wants `fontem:client` rewrites
-   to traverse `awarded → awardedTo`. No materialisation, no
-   drift, but every read pays the join.
-3. **Switch storage**: GraphDB Free, Stardog Free, or Apache
-   Jena Fuseki all support OWL2-RL property chains natively. The
-   migration cost is bounded — the Turtle ontology, fixtures,
-   and CI smoke are portable; only the Helm chart and the actual
-   storage container change. Strongest correctness story.
+**Gate:** every domain is event-driven. No loader writes Neo4j
+or Virtuoso directly; all goes through the queue. Verified by a
+CI job that greps for direct `driver.session()` calls in
+loaders and the Virtuoso graph-CRUD endpoint outside the sinks.
 
-The smoke as-is is honest: it proves what Virtuoso *can* do
-(class hierarchy, inverseOf), and confirms the workaround
-materialisation pattern works on the property chain. It just
-doesn't validate the declarative axiom we wrote in the TBox,
-because Virtuoso ignores it.
+**Estimate:** 3–4 days.
 
-# Open questions / decisions deferred
+### Phase F — Replay-from-zero validation
 
-These are real and need deciding, but only once earlier phases have
-informed them:
+**Deliverables:**
+- Bootstrap script: enumerate every entity in current Virtuoso,
+  emit synthetic Upsert events to seed the log, archive the
+  bridge script
+- Reset both stores to empty; replay from offset 0; assert
+  convergence with a snapshot-comparison test
+- "Rebuild a store from log" runbook documented in
+  [REPLAY-RUNBOOK.md](REPLAY-RUNBOOK.md)
 
-- **Reasoner cost vs query cost trade-off.** OWL2-RL materialised vs
-  query-time inference. Virtuoso defaults to materialised; that's
-  almost certainly right for our workload but we measure during
-  Phase 2.
-- **`owl:sameAs` traversal cost at query time.** If we go the
-  "assert `sameAs`, don't merge" route in Phase 4, every query
-  must `OPTION (transitive)` traverse `sameAs` chains. Could be
-  expensive on busy hubs. Decision deferred to Phase 4.
-- **RDF-star vs reification** for edge attributes. Some attributes
-  (contract value on a relationship) are awkward in pure RDF.
-  Virtuoso supports RDF-star. Default to "drop the attribute,
-  derive from underlying triples"; revisit only where that's
-  clearly worse.
-- **Data versioning / time-travel queries.** Right now we can't
-  answer "what was the state of the graph as of date X". With
-  PROV-O metadata we can — but the queries get complex. Build the
-  capability into Phase 0's `meta.ttl`; decide on UI surfacing
-  later.
+**Gate:** both stores rebuild from `entity_events` alone
+(modulo blank-node IDs) to a state functionally identical to
+before. Difference report is empty for every domain.
 
-# Living document
+**Estimate:** 1 day.
 
-This file changes as the migration progresses. Phases 1+ get
-detailed when they start. Decisions made during a phase get
-back-ported to the relevant section. Don't treat this as a frozen
-spec — treat it as the running record of where we are.
+### Phase G — Operational polish
 
-Last updated: phase 0 starting.
+**Deliverables:**
+- Loki for sink + consolidator logs; correlation by `batch_id`
+- Final PrometheusRule tuning based on observed lag/throughput
+- DLQ-replay tooling: one-shot CronJob that re-fetches and
+  retries DLQ entries
+- Schema-evolution runbook (`v1 → v2` cookbook with example)
+- Consumer-restart-from-offset recipe
+
+**Gate:** alert fires + auto-resolves end-to-end on a deliberate
+sink stall. DLQ-replay tooling round-trips a bad event.
+
+**Estimate:** 0.5 day.
+
+**Total: 10–12 days of focused work.**
+
+## Cross-cutting decisions (decided)
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Event grain | Per-entity, correlated by `batch_id` | Replay granularity + flexible audit views |
+| Idempotency key | `(producer, batch_id, iri)` | Lets sinks dedupe on retry |
+| Failure budget | 5 retries with exponential backoff, then DLQ | Standard at-least-once shape |
+| Schema-version mismatch | Fail loud on unknown versions, manual unblock | Avoid silent corruption |
+| Bulk PUT semantics | `BeginGraphReplace`/`EndGraphReplace` brackets | Preserves Virtuoso PUT-replace at sink, Neo4j wholesale-delete-then-merge |
+| Backpressure | Token bucket on producer side gated by max consumer lag | Prevents queue blow-up during sink outage |
+| Retention | Keep events forever in Phase B; revisit pruning in Phase G | Replay-from-zero always works until we explicitly prune |
+| Tablespace | Dedicated `events_ts` on its own PVC | Operational isolation; can detach + replace |
+
+## Open questions for during execution
+
+These are NOT blockers; they get answered as the relevant phase
+lands and we have measurements. Recorded here so we don't lose
+them:
+
+1. **Sink replica count.** Single replica preserves ordering. Do
+   we want partition-by-domain so each domain has its own
+   Deployment + offset for parallelism? Probably yes for Neo4j
+   (write-heavy); probably no for Virtuoso (PUT-replace is
+   already serialised at the named-graph level). Decide after
+   Phase E load-test.
+
+2. **Event retention.** With ~4M entities × per-entity events ×
+   weekly ETL cycles, the queue grows by ~4M rows/week. Postgres
+   handles billions of rows but the index hot-set matters.
+   Pruning policy probably "compact events older than 90d into
+   a snapshot+delta", but defer to Phase G.
+
+3. **Schema-evolution discipline.** Additive-only changes only
+   for the first year? Or rev the version on every change?
+   Decide as we approach the first real schema rev.
+
+4. **Consolidator idempotency.** The consolidator's outputs
+   should be idempotent under replay (re-running it on the same
+   inputs produces the same outputs). Easy in principle; verify
+   in Phase D.
+
+5. **Bootstrap from existing data.** Virtuoso currently has 4M+
+   entities loaded from the bridge script. For replay-from-zero
+   to mean anything, we need either: (a) reproducible synthesis
+   of starter events from current Virtuoso state, or (b) accept
+   that "from zero" means "from the moment the event log went
+   live, with current data as the synthetic genesis batch". (b)
+   is simpler and what most teams do. Decide in Phase F.
+
+## Status / where we are
+
+- ✅ Phase 0 + 1 + 2 + 3 from the **archived** plan are complete:
+  Virtuoso staging stand-up, ontology + SHACL shapes, sanctions
+  domain, FinancialYear domain, the postgres-fontem custom
+  image, virtuoso-exporter + dashboard, ETL signing chain,
+  bridge `migrate_neo4j_to_virtuoso.py`. All running in prod.
+- ⚠️ The earlier "remove Neo4j entirely" goal has been retired
+  in favour of this architecture. Sanctions and FinancialYear
+  are currently in Virtuoso only — they will get re-bridged
+  back to Neo4j as part of Phase B/C so the consolidator can
+  see them again.
+- 🛠 **Phase A is in flight.** First commits land:
+  - This document (in this PR)
+  - Postgres tablespace + schema migration (next PR)
+  - `gmr-event-schemas` repo skeleton (next PR)
+  - `gmr-events` Python lib skeleton (next PR)
+
+If you're picking this up cold: read this file top to bottom,
+look at TODOs in the codebase tagged `# event-log:`, and check
+ArgoCD for any sink/consumer Deployment that's not at status
+`Synced/Healthy`. Then continue from the open phase.

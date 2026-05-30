@@ -1,21 +1,23 @@
-# Virtuoso OS — single-replica StatefulSet on the staging cluster.
+# Prod Virtuoso — pinned to cluster-node-3-prod via nodeSelector +
+# toleration. Storage lives on the same node's local 4 TB SSD,
+# exported back over NFS (see prod/01-pv-data.yaml).
 #
-# Memory limit pinned at 2 GiB per the cluster-wide tightness; the
-# virtuoso.ini buffer pool sized to fit comfortably below that. CPU
-# is best-effort (5x burst headroom) — Virtuoso is bursty during
-# checkpoints and reasoner materialisation.
-#
-# Headless Service for stable DNS (`virtuoso-0.virtuoso.gmr.svc...`)
-# is not strictly needed for a one-replica set, but keeping the
-# StatefulSet shape lets us scale to a sharded layout later without
-# a manifest rewrite.
+# Sizing carries the lessons learned from the staging incident:
+#   - 4 GiB memory limit (buffer pool + roll-forward overhead)
+#   - 60-minute startup probe budget for roll-forward replay
+#   - 16 HTTP + 12 SQL server threads (in virtuoso.ini)
+#   - virtuoso.ini mounted at /etc/virtuoso-config, NOT subPath'd
+#     onto /database (which would shadow the entrypoint's
+#     [ ! -f virtuoso.ini ] check and skip password-set on a
+#     fresh DB)
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: virtuoso
-  namespace: gmr
+  namespace: fontem-prod
   labels:
     app: virtuoso
+    gmr/environment: prod
 spec:
   replicas: 1
   serviceName: virtuoso-headless
@@ -27,11 +29,6 @@ spec:
       labels:
         app: virtuoso
       annotations:
-        # Match Neo4j + the rest of the data tier — long-running
-        # stateful workloads stay out of the linkerd mesh because
-        # the sidecar lifecycle complicates startup ordering and
-        # the data-tier traffic is in-cluster only (no Internet
-        # exposure that would make mTLS load-bearing).
         linkerd.io/inject: disabled
     spec:
       terminationGracePeriodSeconds: 60
@@ -39,6 +36,16 @@ spec:
         fsGroup: 1000
       imagePullSecrets:
         - name: regcred
+      # Pin to the dedicated production node so the pod, the NFS
+      # server it talks to, and the SSD that backs both are all
+      # on the same physical box.
+      nodeSelector:
+        node-role.kubernetes.io/production: ""
+      tolerations:
+        - key: void42.internal/role
+          operator: Equal
+          value: prod
+          effect: NoSchedule
       containers:
         - name: virtuoso
           image: contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
@@ -52,22 +59,10 @@ spec:
                 secretKeyRef:
                   name: virtuoso-credentials
                   key: VIRTUOSO_DBA_PASSWORD
-            # The upstream entrypoint reads $VIRTUOSO_INI_FILE only when
-            # /database/virtuoso.ini doesn't exist. We deliberately mount
-            # the configmap at a non-magic path (see volumes below)
-            # instead of subPath-shadowing /database/virtuoso.ini — the
-            # subPath approach creates a real file before the entrypoint
-            # runs, so its `[ ! -f virtuoso.ini ]` check skips init,
-            # which skips password-set and leaves the fresh DB on the
-            # default dba/dba credentials.
             - name: VIRTUOSO_INI_FILE
               value: /etc/virtuoso-config/virtuoso.ini
             - name: VIRT_Parameters_NumberOfBuffers
               value: "180000"
-            - name: VIRT_Parameters_ServerThreads
-              value: "4"
-            - name: VIRT_HTTPServer_ServerThreads
-              value: "4"
             - name: VIRT_URIQA_DefaultHost
               value: "data.fontem.eu"
           resources:
@@ -76,13 +71,6 @@ spec:
               memory: 2Gi
             limits:
               cpu: "2"
-              # 4Gi — the buffer pool alone (NumberOfBuffers=180000 ×
-              # 8 KiB) wants ~1.5 GiB, and during roll-forward replay
-              # transient dirty-buffer overhead pushes past the prior
-              # 2 GiB limit. OOM-killed three times in a row trying
-              # to recover a busy log; 4 GiB gives the replay enough
-              # headroom and matches the working-set we want at
-              # steady-state with 16 HTTP threads + 12 SQL threads.
               memory: 4Gi
           volumeMounts:
             - name: data
@@ -96,11 +84,8 @@ spec:
             tcpSocket: { port: 8890 }
             initialDelaySeconds: 10
             periodSeconds: 10
-            # ~60 min cold-start budget. A restart with a busy sink can
-            # leave ~3M unflushed transactions to roll forward at
-            # ~5k tx/s — the prior 3-min budget killed us mid-replay
-            # and we crash-looped, each retry having a longer log than
-            # the last because the sink kept writing.
+            # ~60 min cold-start budget for roll-forward replay
+            # after an unclean restart. See staging incident notes.
             failureThreshold: 360
           readinessProbe:
             httpGet:
@@ -113,10 +98,6 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
-        # Sidecar — translates `isql status('')` + a SPARQL ASK
-        # probe into Prometheus metrics on :9477. Lives in the
-        # same pod so it can talk to localhost without crossing
-        # any Service boundary.
         - name: exporter
           image: contribute.void42.internal/golden/virtuoso-exporter:0.1.2
           imagePullPolicy: IfNotPresent
@@ -147,16 +128,14 @@ spec:
             items:
               - { key: virtuoso.ini, path: virtuoso.ini }
 ---
-# Headless Service for the StatefulSet's stable DNS name. ETLs and
-# the consolidator address virtuoso via the regular ClusterIP
-# Service `virtuoso` defined in 08-services.yaml.
 apiVersion: v1
 kind: Service
 metadata:
   name: virtuoso-headless
-  namespace: gmr
+  namespace: fontem-prod
   labels:
     app: virtuoso
+    gmr/environment: prod
 spec:
   clusterIP: None
   selector:
