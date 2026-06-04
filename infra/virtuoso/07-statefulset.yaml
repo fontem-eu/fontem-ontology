@@ -96,12 +96,29 @@ spec:
             tcpSocket: { port: 8890 }
             initialDelaySeconds: 10
             periodSeconds: 10
-            # ~60 min cold-start budget. A restart with a busy sink can
-            # leave ~3M unflushed transactions to roll forward at
-            # ~5k tx/s — the prior 3-min budget killed us mid-replay
-            # and we crash-looped, each retry having a longer log than
-            # the last because the sink kept writing.
-            failureThreshold: 360
+            # Virtuoso doesn't bind 8890 until the WAL roll-forward
+            # has finished — so the budget here MUST be larger than
+            # the worst-case replay we tolerate before paging.
+            # Probe-driven kills restart the replay from zero, so an
+            # undersized budget produces an unrecoverable death loop
+            # (each retry strictly worse off than the last because
+            # the sink keeps writing during the failed boot).
+            #
+            # History:
+            #   * 36 × 5s = 3 min  — original; killed us mid-replay
+            #     within hours of first prod ingestion.
+            #   * 360 × 10s = 60 min — looked safe in dev. On
+            #     2026-06-04 the prod sink had accumulated ~1B
+            #     transactions during a Virtuoso OOM downtime; the
+            #     roll-forward needed ~3h of uninterrupted disk I/O
+            #     to finish. 60 min budget couldn't even get past
+            #     38% before another probe-driven SIGKILL restarted
+            #     the cycle. Drain went to zero, dirty_entities
+            #     backlog ballooned.
+            #   * 1800 × 10s = 5 h — deliberately wide. Bound by
+            #     the time we're willing to wait before deciding
+            #     the disk has actually failed and paging on-call.
+            failureThreshold: 1800
           readinessProbe:
             httpGet:
               path: /sparql?query=ASK%20%7B%7D
