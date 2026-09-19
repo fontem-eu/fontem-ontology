@@ -8,7 +8,14 @@
 #
 # Build context expected: repository root.
 
-FROM openlink/virtuoso-opensource-7:7.2.17
+# Pinned by digest, not by tag. On 2026-08-05 Docker Hub re-pushed
+# `7.2.17` as a 7.2.18-dev build whose reasoner rejects the property-chain
+# query (SP031), and this smoke went red with no change of ours. The
+# digest is the 7.2.16 release, identical to the image prod and shared run
+# (our signed mirror, contribute.void42.internal/fontem/virtuoso-opensource-7),
+# so the smoke tests the engine production actually uses. Renovate
+# (pinDigests) proposes tag and digest updates as reviewable PRs.
+FROM openlink/virtuoso-opensource-7:7.2.16@sha256:e7a5cd1915569d70d8363503dc62f6bf818b485f1501b230c7608cde8528c72d
 
 ENV VIRT_Parameters_NumberOfBuffers=32000 \
     VIRT_Parameters_MaxCheckpointRemap=8000 \

@@ -54,31 +54,30 @@ each step waits on the previous.
 ### Image supply chain — one-shot before first apply
 
 The StatefulSet + CronJob both pull
-`contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14`,
-mirrored from upstream `openlink/virtuoso-opensource-7:7.2.14`.
-The Kyverno `verify-image-signatures` policy (Enforce mode) and
-`require-sbom-attestation` policy (Audit) both gate
-`contribute.void42.internal/golden/*`, so before the first apply
-the mirrored image must carry a cosign signature and a CycloneDX
-SBOM attestation:
+`contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16@sha256:e7a5cd1915569d70d8363503dc62f6bf818b485f1501b230c7608cde8528c72d`
+— the upstream `openlink/virtuoso-opensource-7:7.2.16` release, copied
+into our registry and pinned by digest. Never pin by tag: in August 2026
+Docker Hub re-pushed `7.2.17` as a 7.2.18-dev build.
+The Kyverno `verify-image-signatures` and `require-sbom-attestation`
+policies gate `contribute.void42.internal/fontem/*`, so a mirrored image
+must carry a cosign signature and a CycloneDX SBOM attestation, both on
+the digest and never uploaded to the public Rekor log:
 
 ```
-docker pull docker.io/openlink/virtuoso-opensource-7:7.2.14
-docker tag  docker.io/openlink/virtuoso-opensource-7:7.2.14 \
-            contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
-docker push contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
+# copy --all keeps the multi-arch index, so the digest stays identical
+# to Docker Hub's (gitops hack/mirror-image.sh runs the same copy as a Job)
+skopeo copy --all docker://docker.io/openlink/virtuoso-opensource-7:7.2.16 \
+    docker://contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16
+REF=contribute.void42.internal/fontem/virtuoso-opensource-7@sha256:e7a5cd1915569d70d8363503dc62f6bf818b485f1501b230c7608cde8528c72d
 
 # Cosign key lives in the devspaces ns secret `cosign-keys`
 kubectl get secret -n devspaces cosign-keys -o jsonpath='{.data.cosign\.key}' \
     | base64 -d > /tmp/cosign.key
-COSIGN_PASSWORD="" cosign sign --key /tmp/cosign.key --yes \
-    contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
-
-syft contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14 \
-    -o cyclonedx-json=/tmp/sbom.cdx.json
-COSIGN_PASSWORD="" cosign attest --key /tmp/cosign.key --type cyclonedx \
-    --predicate /tmp/sbom.cdx.json --yes \
-    contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
+COSIGN_PASSWORD="" cosign sign --recursive --tlog-upload=false \
+    --key /tmp/cosign.key --yes "$REF"
+syft "registry:$REF" --platform linux/amd64 -o cyclonedx-json=/tmp/sbom.cdx.json
+COSIGN_PASSWORD="" cosign attest --tlog-upload=false --key /tmp/cosign.key \
+    --type cyclonedx --predicate /tmp/sbom.cdx.json --yes "$REF"
 rm /tmp/cosign.key
 ```
 

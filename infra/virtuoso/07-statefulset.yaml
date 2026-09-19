@@ -41,7 +41,7 @@ spec:
         - name: regcred
       containers:
         - name: virtuoso
-          image: contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14
+          image: contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16@sha256:e7a5cd1915569d70d8363503dc62f6bf818b485f1501b230c7608cde8528c72d
           imagePullPolicy: IfNotPresent
           ports:
             - { name: sparql, containerPort: 8890, protocol: TCP }
