@@ -8,7 +8,9 @@
 #
 # Build context expected: repository root.
 
-FROM stain/jena-fuseki:5.1.0
+# Pinned by digest for the same reason as the Virtuoso image: a tag can
+# be re-pushed upstream and silently change what this gate tests.
+FROM stain/jena-fuseki:5.1.0@sha256:b1d0c96f19adddef417520184471ac816cf36c6e72936a88ea02b29f4305929a
 
 # TBox + fixtures baked in (same paths as the Virtuoso image).
 # The run.sh loader uploads them through Fuseki's HTTP endpoints
