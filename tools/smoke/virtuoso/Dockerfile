@@ -15,7 +15,7 @@
 # (our signed mirror, contribute.void42.internal/fontem/virtuoso-opensource-7),
 # so the smoke tests the engine production actually uses. Renovate
 # (pinDigests) proposes tag and digest updates as reviewable PRs.
-FROM openlink/virtuoso-opensource-7:7.2.16@sha256:e7a5cd1915569d70d8363503dc62f6bf818b485f1501b230c7608cde8528c72d
+FROM openlink/virtuoso-opensource-7:7.2.17@sha256:0dbe1ab4fa0cb7bbafc1f6c0c2b0a5d6f22d918dbd17672f2ddb24580aa6756a
 
 ENV VIRT_Parameters_NumberOfBuffers=32000 \
     VIRT_Parameters_MaxCheckpointRemap=8000 \
